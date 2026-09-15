@@ -1,0 +1,17 @@
+.git
+.github
+.idea
+.vscode
+.env
+**/.env*
+*.db
+*.sqlite3
+*.docx
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/.coverage
+**/node_modules
+**/dist
+**/playwright-report
+**/test-results
