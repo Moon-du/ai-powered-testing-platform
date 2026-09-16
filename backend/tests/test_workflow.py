@@ -58,6 +58,145 @@ def test_create_project_wizard_contract(client: TestClient) -> None:
     assert context.json()["counts"]["TESTING_RULE"] == 2
 
 
+def test_project_can_be_created_without_product_type_or_knowledge_pack(
+    client: TestClient,
+) -> None:
+    response = client.post(
+        "/api/v1/projects",
+        json={"project_code": "UNCLASSIFIED-1", "name": "待分类项目"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["product_type_id"] is None
+    assert response.json()["knowledge_pack_id"] is None
+    assert response.json()["knowledge_pack_version"] is None
+
+
+def test_project_knowledge_file_is_private_and_versioned(client: TestClient) -> None:
+    product = client.get("/api/v1/product-types").json()["items"][0]
+    preset = client.get(
+        f"/api/v1/product-types/{product['id']}/knowledge-packs"
+    ).json()["items"][0]
+    original_summary = preset["summary"]
+    response = client.post(
+        "/api/v1/projects",
+        json={
+            "project_code": "PRIVATE-KNOWLEDGE-1",
+            "name": "项目私有知识",
+            "product_type_id": product["id"],
+            "knowledge_pack_id": preset["id"],
+            "knowledge_pack_version": preset["version"],
+        },
+    )
+    assert response.status_code == 201, response.text
+    project_id = response.json()["id"]
+
+    uploaded = client.post(
+        f"/api/v1/projects/{project_id}/knowledge/files?bump_version=false",
+        files={"files": ("guide.txt", "项目专属校准流程。", "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["knowledge_pack_id"] != preset["id"]
+    assert uploaded.json()["knowledge_pack_version"] == preset["version"]
+    document = next(
+        item for item in uploaded.json()["items"] if item["title"] == "guide.txt"
+    )
+
+    updated = client.put(
+        f"/api/v1/projects/{project_id}/knowledge/items/{document['code']}?bump_version=true",
+        json={
+            "item_type": "DOCUMENT",
+            "title": "项目校准指南",
+            "content": "更新后的项目专属校准流程。",
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["knowledge_pack_version"] != preset["version"]
+
+    presets_after = client.get(
+        f"/api/v1/product-types/{product['id']}/knowledge-packs"
+    ).json()["items"]
+    unchanged = next(item for item in presets_after if item["id"] == preset["id"])
+    assert unchanged["summary"] == original_summary
+
+
+def test_requirement_analysis_succeeds_without_knowledge_pack(
+    client: TestClient,
+) -> None:
+    project = client.post(
+        "/api/v1/projects",
+        json={"project_code": "NO-PACK-AI", "name": "无知识包分析"},
+    ).json()
+    requirement = client.post(
+        f"/api/v1/projects/{project['id']}/requirements",
+        json={
+            "requirement_code": "REQ-NO-PACK",
+            "title": "无知识包需求",
+            "original_text": "系统应在操作完成后显示成功状态。",
+        },
+    )
+    assert requirement.status_code == 201, requirement.text
+
+    run = client.post(
+        f"/api/v1/requirements/{requirement.json()['id']}/analyze"
+    )
+    assert run.status_code == 202, run.text
+    assert run.json()["status"] == "SUCCEEDED"
+    assert run.json()["error_code"] is None
+
+
+def test_deleting_last_project_knowledge_item_restores_none(
+    client: TestClient,
+) -> None:
+    project = client.post(
+        "/api/v1/projects",
+        json={"project_code": "EMPTY-KNOWLEDGE", "name": "空知识项目"},
+    ).json()
+    uploaded = client.post(
+        f"/api/v1/projects/{project['id']}/knowledge/files",
+        files={"files": ("only.txt", "唯一知识条目。", "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+
+    item_code = uploaded.json()["items"][0]["code"]
+    deleted = client.delete(
+        f"/api/v1/projects/{project['id']}/knowledge/items/{item_code}"
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["items"] == []
+    assert deleted.json()["knowledge_pack_id"] is None
+    assert deleted.json()["knowledge_pack_version"] is None
+
+
+def test_delete_project_removes_private_knowledge_and_project_access(
+    client: TestClient,
+) -> None:
+    project = client.post(
+        "/api/v1/projects",
+        json={"project_code": "DELETE-ME", "name": "待删除项目"},
+    ).json()
+    uploaded = client.post(
+        f"/api/v1/projects/{project['id']}/knowledge/files",
+        files={"files": ("private.txt", "仅属于待删除项目。", "text/plain")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    private_pack_id = uploaded.json()["knowledge_pack_id"]
+    requirement = client.post(
+        f"/api/v1/projects/{project['id']}/requirements",
+        json={
+            "requirement_code": "REQ-DELETE",
+            "title": "待删除需求",
+            "original_text": "本需求随项目删除。",
+        },
+    )
+    assert requirement.status_code == 201, requirement.text
+
+    deleted = client.delete(f"/api/v1/projects/{project['id']}")
+    assert deleted.status_code == 204, deleted.text
+    assert client.get(f"/api/v1/projects/{project['id']}").status_code == 404
+    assert client.get(f"/api/v1/knowledge-packs/{private_pack_id}").status_code == 404
+
+
 def test_human_gates_and_executable_case(client: TestClient, ids: dict[str, str]) -> None:
     run = client.post(f"/api/v1/requirements/{ids['requirement']}/analyze")
     assert run.status_code == 202
@@ -408,7 +547,7 @@ def test_idempotency_replays_identical_request_and_rejects_key_reuse(
     assert snapshot["knowledge_content_hash"]
     assert "knowledge_items" not in snapshot
     assert "original_text" not in snapshot["requirement"]
-    assert snapshot["prompt_version"] == "p0-fake-v1"
+    assert snapshot["prompt_version"] == "deepseek-v1"
     assert snapshot["validator_version"] == "p0-domain-v1"
     assert snapshot["policy_version"] == "p0-guardrail-v1"
     workflow = client.get(

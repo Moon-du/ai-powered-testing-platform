@@ -1,4 +1,3 @@
-from app.ai.gateway import DomainValidator, FakeLLMGateway, LLMGateway
+from app.ai.gateway import DeepSeekLLMGateway, DomainValidator, FakeLLMGateway, LLMGateway, build_llm_gateway
 
-__all__ = ["DomainValidator", "FakeLLMGateway", "LLMGateway"]
-
+__all__ = ["DeepSeekLLMGateway", "DomainValidator", "FakeLLMGateway", "LLMGateway", "build_llm_gateway"]

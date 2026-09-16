@@ -11,7 +11,7 @@ withDefaults(
 </script>
 
 <template>
-  <a-empty v-if="!references.length" description="暂无知识引用" :image="null" />
+  <a-empty v-if="!references.length" description="暂无知识引用" />
   <a-list v-else :data-source="references" :size="compact ? 'small' : 'default'">
     <template #renderItem="{ item }">
       <a-list-item>

@@ -5,7 +5,8 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import {
   ArrowLeftOutlined,
   BranchesOutlined,
-  BulbOutlined,
+  DeleteOutlined,
+  EditOutlined,
   PlayCircleOutlined,
   SafetyCertificateOutlined,
 } from '@ant-design/icons-vue'
@@ -18,16 +19,16 @@ import StatusTag from '@/components/common/StatusTag.vue'
 import AiGenerationStatus from '@/components/workflow/AiGenerationStatus.vue'
 import KnowledgeReferenceList from '@/components/workflow/KnowledgeReferenceList.vue'
 import ReviewActions from '@/components/workflow/ReviewActions.vue'
-import WhyGeneratedDrawer from '@/components/workflow/WhyGeneratedDrawer.vue'
+import WhyGeneratedPopover from '@/components/workflow/WhyGeneratedPopover.vue'
 import type {
   AiRun,
-  KnowledgeReference,
   RequirementAnalysis,
   RequirementRisk,
+  RejectionFeedback,
   RiskBatch,
   ScenarioBatch,
-  TestCase,
   TestCaseBatch,
+  TestCase,
   TestScenario,
   WorkflowAction,
 } from '@/types'
@@ -46,16 +47,24 @@ const queryClient = useQueryClient()
 const projectId = String(route.params.projectId)
 const requirementId = String(route.params.requirementId)
 const activeTab = ref('requirement')
+const activeWhyIdentifier = ref<string | null>(null)
 const busyAction = ref<string | null>(null)
 const activeRunId = ref<string | null>(null)
 const latestRun = ref<AiRun | null>(null)
 const handledRuns = new Set<string>()
+type Stage = 'analysis' | 'risks' | 'scenarios' | 'testcases'
+type EditableAsset = RequirementAnalysis | RequirementRisk | TestScenario | TestCase
+const rejectionStage = ref<Stage | null>(null)
+const rejectionReason = ref<RejectionFeedback['reason'] | undefined>()
+const rejectionNote = ref('')
+const editing = ref<{ stage: Stage; item: EditableAsset } | null>(null)
+const editForm = ref<Record<string, string>>({})
+const deleteTarget = ref<{ stage: Stage; item: EditableAsset } | null>(null)
+const deleteReason = ref('')
 
-const whyOpen = ref(false)
-const whyTitle = ref('为什么生成')
-const whyReason = ref('')
-const whyReferences = ref<KnowledgeReference[]>([])
-const whyTrace = ref<string[]>([])
+watch(activeTab, () => {
+  activeWhyIdentifier.value = null
+})
 
 const projectQuery = useQuery({
   queryKey: ['project', projectId],
@@ -136,8 +145,15 @@ const approvedScenarios = computed(
 const clarificationCount = computed(() =>
   countClarificationRequired(testCaseBatchQuery.data.value?.test_cases ?? []),
 )
+const selectedRiskIds = ref<string[]>([])
 const selectedScenarioIds = ref<string[]>([])
 const selectedTestCaseIds = ref<string[]>([])
+const reviewableRisks = computed(
+  () =>
+    riskBatchQuery.data.value?.risks.filter(
+      (risk) => !['APPROVED', 'STALE', 'SUPERSEDED'].includes(risk.review_status),
+    ) ?? [],
+)
 const reviewableScenarios = computed(
   () =>
     scenarioBatchQuery.data.value?.scenarios.filter(
@@ -158,6 +174,17 @@ const selectedApprovableTestCaseIds = computed(() =>
 )
 const selectedBlockedTestCaseCount = computed(
   () => selectedTestCaseIds.value.length - selectedApprovableTestCaseIds.value.length,
+)
+
+watch(
+  () => reviewableRisks.value.map((risk) => `${risk.id}:${risk.revision}`).join('|'),
+  () => {
+    const eligible = reviewableRisks.value.map((risk) => risk.id)
+    const eligibleSet = new Set(eligible)
+    const preserved = selectedRiskIds.value.filter((id) => eligibleSet.has(id))
+    selectedRiskIds.value = preserved.length ? preserved : eligible
+  },
+  { immediate: true },
 )
 
 watch(
@@ -239,6 +266,12 @@ function toggleScenarioSelection(id: string, checked: boolean): void {
     : selectedScenarioIds.value.filter((selectedId) => selectedId !== id)
 }
 
+function toggleRiskSelection(id: string, checked: boolean): void {
+  selectedRiskIds.value = checked
+    ? [...new Set([...selectedRiskIds.value, id])]
+    : selectedRiskIds.value.filter((selectedId) => selectedId !== id)
+}
+
 function toggleTestCaseSelection(id: string, checked: boolean): void {
   selectedTestCaseIds.value = checked
     ? [...new Set([...selectedTestCaseIds.value, id])]
@@ -313,13 +346,13 @@ function regenerateTestCases(): void {
   }
 }
 
-async function reviewAnalysis(action: 'APPROVE' | 'REJECT'): Promise<void> {
+async function reviewAnalysis(action: 'APPROVE' | 'REJECT', feedback?: RejectionFeedback): Promise<void> {
   if (!actionAvailable('REVIEW_ANALYSIS')) return
   const analysis = analysisQuery.data.value
   if (!analysis) return
   busyAction.value = 'analysis-review'
   try {
-    const updated = await platformApi.reviewAnalysis(requirementId, analysis, action)
+    const updated = await platformApi.reviewAnalysis(requirementId, analysis, action, feedback)
     queryClient.setQueryData<RequirementAnalysis>(['analysis', requirementId, analysis.id], updated)
     await refreshAll()
     void message.success(action === 'APPROVE' ? 'Analysis 已批准' : 'Analysis 已拒绝')
@@ -330,13 +363,17 @@ async function reviewAnalysis(action: 'APPROVE' | 'REJECT'): Promise<void> {
   }
 }
 
-async function reviewRisks(action: 'APPROVE' | 'REJECT'): Promise<void> {
+async function reviewRisks(action: 'APPROVE' | 'REJECT', feedback?: RejectionFeedback): Promise<void> {
   if (!actionAvailable('REVIEW_RISKS')) return
   const batch = riskBatchQuery.data.value
   if (!batch) return
+  if (!selectedRiskIds.value.length) {
+    void message.warning('请至少选择一个 Risk')
+    return
+  }
   busyAction.value = 'risk-review'
   try {
-    const updated = await platformApi.reviewRiskBatch(batch, action)
+    const updated = await platformApi.reviewRiskBatch(batch, action, selectedRiskIds.value, feedback)
     queryClient.setQueryData<RiskBatch>(['risk-batch', batch.id], updated)
     await refreshAll()
     void message.success(action === 'APPROVE' ? 'Risk Batch 已批准' : 'Risk Batch 已拒绝')
@@ -347,7 +384,7 @@ async function reviewRisks(action: 'APPROVE' | 'REJECT'): Promise<void> {
   }
 }
 
-async function reviewScenarios(action: 'APPROVE' | 'REJECT'): Promise<void> {
+async function reviewScenarios(action: 'APPROVE' | 'REJECT', feedback?: RejectionFeedback): Promise<void> {
   if (!actionAvailable('REVIEW_SCENARIOS')) return
   const batch = scenarioBatchQuery.data.value
   if (!batch) return
@@ -358,7 +395,7 @@ async function reviewScenarios(action: 'APPROVE' | 'REJECT'): Promise<void> {
   }
   busyAction.value = 'scenario-review'
   try {
-    const updated = await platformApi.reviewScenarioBatch(batch, action, scenarioIds)
+    const updated = await platformApi.reviewScenarioBatch(batch, action, scenarioIds, feedback)
     queryClient.setQueryData<ScenarioBatch>(['scenario-batch', batch.id], updated)
     await refreshAll()
     void message.success(action === 'APPROVE' ? 'Scenario 已批准，可以生成 Test Case' : 'Scenario 已拒绝')
@@ -369,7 +406,7 @@ async function reviewScenarios(action: 'APPROVE' | 'REJECT'): Promise<void> {
   }
 }
 
-async function reviewTestCases(action: 'APPROVE' | 'REJECT'): Promise<void> {
+async function reviewTestCases(action: 'APPROVE' | 'REJECT', feedback?: RejectionFeedback): Promise<void> {
   if (!actionAvailable('REVIEW_TEST_CASES')) return
   const batch = testCaseBatchQuery.data.value
   if (!batch) return
@@ -387,7 +424,7 @@ async function reviewTestCases(action: 'APPROVE' | 'REJECT'): Promise<void> {
   }
   busyAction.value = 'testcase-review'
   try {
-    const updated = await platformApi.reviewTestCaseBatch(batch, action, testCaseIds)
+    const updated = await platformApi.reviewTestCaseBatch(batch, action, testCaseIds, feedback)
     queryClient.setQueryData<TestCaseBatch>(['testcase-batch', batch.id], updated)
     await refreshAll()
     void message.success(action === 'APPROVE' ? 'Test Case 已批准' : 'Test Case 已拒绝')
@@ -398,45 +435,104 @@ async function reviewTestCases(action: 'APPROVE' | 'REJECT'): Promise<void> {
   }
 }
 
-function showWhy(
-  title: string,
-  reason: string,
-  references: KnowledgeReference[] | undefined,
-  trace: string[],
-): void {
-  whyTitle.value = title
-  whyReason.value = reason
-  whyReferences.value = references ?? []
-  whyTrace.value = trace
-  whyOpen.value = true
+function openRejection(stage: Stage): void {
+  rejectionStage.value = stage
+  rejectionReason.value = undefined
+  rejectionNote.value = ''
 }
 
-function showRiskWhy(risk: RequirementRisk): void {
-  showWhy(
-    `${risk.risk_code} · 为什么识别此风险`,
-    risk.rationale,
-    risk.knowledge_references,
-    [requirementQuery.data.value?.requirement_code ?? requirementId, risk.risk_code],
-  )
+async function submitRejection(): Promise<void> {
+  if (!rejectionStage.value || !rejectionReason.value) {
+    void message.warning('请选择拒绝原因')
+    return
+  }
+  if (rejectionReason.value === 'OTHER' && !rejectionNote.value.trim()) {
+    void message.warning('选择“其他”时请填写说明')
+    return
+  }
+  const feedback = { reason: rejectionReason.value, note: rejectionNote.value.trim() || undefined }
+  const stage = rejectionStage.value
+  rejectionStage.value = null
+  if (stage === 'analysis') await reviewAnalysis('REJECT', feedback)
+  if (stage === 'risks') await reviewRisks('REJECT', feedback)
+  if (stage === 'scenarios') await reviewScenarios('REJECT', feedback)
+  if (stage === 'testcases') await reviewTestCases('REJECT', feedback)
 }
 
-function showScenarioWhy(scenario: TestScenario): void {
-  showWhy(
-    `${scenario.scenario_code} · 为什么生成此场景`,
-    scenario.generation_reason,
-    scenario.knowledge_references,
-    [requirementQuery.data.value?.requirement_code ?? requirementId, 'Requirement Risk', scenario.scenario_code],
-  )
+function lines(value: unknown): string {
+  return Array.isArray(value) ? value.map(String).join('\n') : ''
 }
 
-function showTestCaseWhy(testCase: TestCase): void {
-  showWhy(
-    `${testCase.test_case_code} · 为什么生成此用例`,
-    testCase.generation_reason ?? `Generated from approved scenario ${testCase.scenario_id}`,
-    testCase.knowledge_references,
-    [requirementQuery.data.value?.requirement_code ?? requirementId, testCase.scenario_id, testCase.test_case_code],
-  )
+function openEdit(stage: Stage, item: EditableAsset): void {
+  editing.value = { stage, item }
+  if (stage === 'analysis') {
+    const value = item as RequirementAnalysis
+    editForm.value = { summary: value.summary, ambiguities: JSON.stringify(value.ambiguities ?? [], null, 2), assertions: JSON.stringify(value.assertions ?? [], null, 2) }
+  } else if (stage === 'risks') {
+    const value = item as RequirementRisk
+    editForm.value = { title: value.title, description: value.description, likelihood: value.likelihood ?? '', impact: value.severity ?? '', rationale: value.rationale }
+  } else if (stage === 'scenarios') {
+    const value = item as TestScenario
+    editForm.value = { title: value.title, intent: value.test_intent, category: value.scenario_type, expected_result: value.expected_behavior_summary ?? '', expected_result_status: value.expected_behavior_status, blocking_questions: lines(value.blocking_questions), preconditions: lines(value.preconditions) }
+  } else {
+    const value = item as TestCase
+    editForm.value = { title: value.title, objective: value.objective ?? '', preconditions: lines(value.preconditions), configuration: JSON.stringify(value.configuration ?? {}, null, 2), expected_result: value.expected_result ?? '', expected_result_status: value.expected_result_status ?? 'DEFINED', blocking_questions: lines(value.blocking_questions), steps: JSON.stringify(value.steps.map((step) => ({ action: step.action, expected_result: step.expected_result, test_data: step.test_data ?? {} })), null, 2) }
+  }
 }
+
+function parseJsonField(name: string): unknown {
+  try { return JSON.parse(String(editForm.value[name] ?? '')) } catch { throw new Error(`${name} 必须是有效 JSON`) }
+}
+
+async function saveEdit(): Promise<void> {
+  const target = editing.value
+  if (!target) return
+  busyAction.value = `${target.stage}-edit`
+  try {
+    let updated: EditableAsset
+    if (target.stage === 'analysis') {
+      updated = await platformApi.updateAnalysis(target.item as RequirementAnalysis, { summary: editForm.value.summary, ambiguities: parseJsonField('ambiguities'), assertions: parseJsonField('assertions') })
+      queryClient.setQueryData(['analysis', requirementId, target.item.id], updated)
+    } else if (target.stage === 'risks') {
+      updated = await platformApi.updateRisk(target.item as RequirementRisk, editForm.value)
+      await riskBatchQuery.refetch()
+    } else if (target.stage === 'scenarios') {
+      const expected = String(editForm.value.expected_result ?? '').trim()
+      updated = await platformApi.updateScenario(target.item as TestScenario, { ...editForm.value, preconditions: linesToArray(editForm.value.preconditions), blocking_questions: linesToArray(editForm.value.blocking_questions), expected_result: expected || null })
+      await scenarioBatchQuery.refetch()
+    } else {
+      const expectedStatus = editForm.value.expected_result_status
+      updated = await platformApi.updateTestCase(target.item as TestCase, { ...editForm.value, preconditions: linesToArray(editForm.value.preconditions), blocking_questions: linesToArray(editForm.value.blocking_questions), configuration: parseJsonField('configuration'), steps: parseJsonField('steps'), expected_result: expectedStatus === 'DEFINED' ? editForm.value.expected_result : null })
+      await testCaseBatchQuery.refetch()
+    }
+    void updated
+    editing.value = null
+    await refreshAll()
+    void message.success('修改已保存，下游相关内容已标记为需要重新生成')
+  } catch (error) { void message.error(readableApiError(error)) } finally { busyAction.value = null }
+}
+
+function linesToArray(value: unknown): string[] {
+  return String(value ?? '').split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+}
+
+async function submitDelete(): Promise<void> {
+  const target = deleteTarget.value
+  if (!target || !deleteReason.value.trim()) { void message.warning('请填写删除原因'); return }
+  busyAction.value = `${target.stage}-delete`
+  try {
+    if (target.stage === 'analysis') await platformApi.deleteAnalysis(target.item as RequirementAnalysis, deleteReason.value.trim())
+    if (target.stage === 'risks') await platformApi.deleteRisk(target.item as RequirementRisk, deleteReason.value.trim())
+    if (target.stage === 'scenarios') await platformApi.deleteScenario(target.item as TestScenario, deleteReason.value.trim())
+    if (target.stage === 'testcases') await platformApi.deleteTestCase(target.item as TestCase, deleteReason.value.trim())
+    deleteTarget.value = null
+    deleteReason.value = ''
+    await refreshAll()
+    await Promise.all([analysisQuery.refetch(), riskBatchQuery.refetch(), scenarioBatchQuery.refetch(), testCaseBatchQuery.refetch()])
+    void message.success('已删除；审计记录仍保留')
+  } catch (error) { void message.error(readableApiError(error)) } finally { busyAction.value = null }
+}
+
 </script>
 
 <template>
@@ -467,15 +563,6 @@ function showTestCaseWhy(testCase: TestCase): void {
       message="上游测试语义已变化，下游资产标记为 STALE。"
       description="请从最早受影响阶段重新审阅或生成；旧版本仍保留用于追溯。"
       style="margin-top: 18px"
-    />
-    <a-alert
-      v-for="reason in workflowQuery.data.value?.blocking_reasons ?? []"
-      :key="reason.code"
-      type="error"
-      show-icon
-      :message="reason.message"
-      :description="reason.code"
-      style="margin-top: 12px"
     />
   </a-card>
 
@@ -544,6 +631,8 @@ function showTestCaseWhy(testCase: TestCase): void {
               <StatusTag :status="analysisQuery.data.value.review_status" kind="review" />
               <a-tag>Version {{ analysisQuery.data.value.analysis_version }}</a-tag>
               <a-tag v-if="analysisQuery.data.value.testability" color="cyan">{{ analysisQuery.data.value.testability }}</a-tag>
+              <a-button size="small" @click="openEdit('analysis', analysisQuery.data.value)"><EditOutlined />编辑</a-button>
+              <a-button size="small" danger @click="deleteTarget = { stage: 'analysis', item: analysisQuery.data.value }; deleteReason = ''"><DeleteOutlined />删除</a-button>
             </a-space>
             <ReviewActions
               :status="analysisQuery.data.value.review_status"
@@ -551,12 +640,13 @@ function showTestCaseWhy(testCase: TestCase): void {
               :review-disabled="!actionAvailable('REVIEW_ANALYSIS')"
               :regenerate-disabled="!actionAvailable('REGENERATE_ANALYSIS')"
               @approve="void reviewAnalysis('APPROVE')"
-              @reject="void reviewAnalysis('REJECT')"
+              @reject="openRejection('analysis')"
               @regenerate="regenerateAnalysis"
             />
           </div>
 
           <a-divider />
+          <a-alert v-if="analysisQuery.data.value.rejection_reason" type="error" show-icon :message="`拒绝原因：${analysisQuery.data.value.rejection_reason}`" :description="analysisQuery.data.value.rejection_note || undefined" style="margin-bottom: 16px" />
           <a-typography-title :level="4">{{ analysisQuery.data.value.summary }}</a-typography-title>
           <a-typography-paragraph v-if="analysisQuery.data.value.intent">{{ analysisQuery.data.value.intent }}</a-typography-paragraph>
 
@@ -583,7 +673,7 @@ function showTestCaseWhy(testCase: TestCase): void {
           </a-row>
 
           <a-row :gutter="[18, 18]" style="margin-top: 18px">
-            <a-col :xs="24" :lg="8">
+            <a-col :span="24">
               <a-card title="Ambiguities" size="small" class="asset-card asset-card--gap">
                 <a-list :data-source="analysisQuery.data.value.ambiguities ?? []" size="small">
                   <template #renderItem="{ item }"><a-list-item>{{ recordText(item) }}</a-list-item></template>
@@ -591,7 +681,7 @@ function showTestCaseWhy(testCase: TestCase): void {
                 <span v-if="!(analysisQuery.data.value.ambiguities?.length)" class="muted">未发现歧义</span>
               </a-card>
             </a-col>
-            <a-col :xs="24" :lg="8">
+            <a-col :span="24">
               <a-card title="Missing Information" size="small" class="asset-card asset-card--gap">
                 <a-list :data-source="analysisQuery.data.value.missing_information ?? []" size="small">
                   <template #renderItem="{ item }"><a-list-item>{{ recordText(item) }}</a-list-item></template>
@@ -599,7 +689,7 @@ function showTestCaseWhy(testCase: TestCase): void {
                 <span v-if="!(analysisQuery.data.value.missing_information?.length)" class="muted">未发现缺失信息</span>
               </a-card>
             </a-col>
-            <a-col :xs="24" :lg="8">
+            <a-col :span="24">
               <a-card title="Questions" size="small" class="asset-card asset-card--gap">
                 <a-list :data-source="analysisQuery.data.value.questions ?? []" size="small">
                   <template #renderItem="{ item }"><a-list-item>{{ recordText(item) }}</a-list-item></template>
@@ -658,10 +748,11 @@ function showTestCaseWhy(testCase: TestCase): void {
             <ReviewActions
               :status="riskBatchQuery.data.value.review_status"
               :loading="busyAction === 'risk-review'"
-              :review-disabled="!actionAvailable('REVIEW_RISKS')"
+              :review-disabled="!actionAvailable('REVIEW_RISKS') || !selectedRiskIds.length"
+              :approve-disabled="!selectedRiskIds.length"
               :regenerate-disabled="!actionAvailable('REGENERATE_RISKS')"
               @approve="void reviewRisks('APPROVE')"
-              @reject="void reviewRisks('REJECT')"
+              @reject="openRejection('risks')"
               @regenerate="regenerateRisks"
             />
           </div>
@@ -676,11 +767,23 @@ function showTestCaseWhy(testCase: TestCase): void {
             >
               <template #title>
                 <a-space wrap>
+                  <a-checkbox
+                    :aria-label="`选择 Risk ${risk.risk_code}`"
+                    :checked="selectedRiskIds.includes(risk.id)"
+                    :disabled="['APPROVED', 'STALE', 'SUPERSEDED'].includes(risk.review_status) || !actionAvailable('REVIEW_RISKS')"
+                    @change="toggleRiskSelection(risk.id, checkboxChecked($event))"
+                  />
                   <span class="mono">{{ risk.risk_code }}</span>
                   <span>{{ risk.title }}</span>
                 </a-space>
               </template>
-              <template #extra><StatusTag :status="risk.review_status" kind="review" /></template>
+              <template #extra>
+                <a-space>
+                  <StatusTag :status="risk.review_status" kind="review" />
+                  <a-button size="small" @click="openEdit('risks', risk)"><EditOutlined />编辑</a-button>
+                  <a-button size="small" danger @click="deleteTarget = { stage: 'risks', item: risk }; deleteReason = ''"><DeleteOutlined />删除</a-button>
+                </a-space>
+              </template>
               <a-space wrap style="margin-bottom: 10px">
                 <a-tag v-if="risk.priority" color="red">{{ risk.priority }} Priority</a-tag>
                 <a-tag v-if="risk.severity">Severity {{ risk.severity }}</a-tag>
@@ -689,10 +792,19 @@ function showTestCaseWhy(testCase: TestCase): void {
               </a-space>
               <p>{{ risk.description }}</p>
               <a-typography-paragraph type="secondary">{{ risk.rationale }}</a-typography-paragraph>
-              <a-button type="link" style="padding: 0" @click="showRiskWhy(risk)">
-                <BulbOutlined /> Why Generated
-              </a-button>
+              <a-alert v-if="risk.rejection_reason" type="error" show-icon :message="`拒绝原因：${risk.rejection_reason}`" :description="risk.rejection_note || undefined" style="margin-bottom: 10px" />
+              <WhyGeneratedPopover
+                :identifier="`risk-${risk.id}`"
+                :active-identifier="activeWhyIdentifier"
+                :reason="risk.rationale"
+                :references="risk.knowledge_references"
+                :trace="[requirementQuery.data.value?.requirement_code ?? requirementId, risk.risk_code]"
+                @activate="activeWhyIdentifier = $event"
+              />
             </a-card>
+          </div>
+          <div class="muted selection-summary">
+            已选择 {{ selectedRiskIds.length }} 个待审 Risk；审批只提交所选项。
           </div>
           <div style="margin-top: 20px; text-align: right">
             <a-tooltip :title="approvedRisks.length ? '' : '至少批准一项 Risk'">
@@ -731,7 +843,7 @@ function showTestCaseWhy(testCase: TestCase): void {
               :regenerate-disabled="!actionAvailable('REGENERATE_SCENARIOS')"
               :approve-disabled="!selectedScenarioIds.length"
               @approve="void reviewScenarios('APPROVE')"
-              @reject="void reviewScenarios('REJECT')"
+              @reject="openRejection('scenarios')"
               @regenerate="regenerateScenarios"
             />
           </div>
@@ -747,7 +859,7 @@ function showTestCaseWhy(testCase: TestCase): void {
               { title: 'Priority', dataIndex: 'priority', key: 'priority', width: 110 },
               { title: 'Expected Behavior', key: 'expected', width: 180 },
               { title: 'Review', key: 'review', width: 130 },
-              { title: '', key: 'why', width: 140 },
+              { title: '操作', key: 'actions', width: 250 },
             ]"
             :scroll="{ x: 990 }"
           >
@@ -764,12 +876,26 @@ function showTestCaseWhy(testCase: TestCase): void {
                 <strong>{{ record.title }}</strong>
                 <div class="muted mono">{{ record.scenario_code }}</div>
                 <div class="muted">{{ record.test_intent }}</div>
+                <div v-if="record.rejection_reason" class="rejection-feedback">拒绝原因：{{ record.rejection_reason }}<span v-if="record.rejection_note"> · {{ record.rejection_note }}</span></div>
               </template>
               <template v-else-if="column.key === 'expected'">
                 <StatusTag :status="record.expected_behavior_status" kind="expected" />
               </template>
               <template v-else-if="column.key === 'review'"><StatusTag :status="record.review_status" kind="review" /></template>
-              <template v-else-if="column.key === 'why'"><a-button type="link" @click="showScenarioWhy(record)"><BulbOutlined /> Why Generated</a-button></template>
+              <template v-else-if="column.key === 'actions'">
+                <a-space>
+                  <WhyGeneratedPopover
+                    :identifier="`scenario-${record.id}`"
+                    :active-identifier="activeWhyIdentifier"
+                    :reason="record.generation_reason"
+                    :references="record.knowledge_references"
+                    :trace="[requirementQuery.data.value?.requirement_code ?? requirementId, 'Requirement Risk', record.scenario_code]"
+                    @activate="activeWhyIdentifier = $event"
+                  />
+                  <a-button size="small" @click="openEdit('scenarios', record)"><EditOutlined /></a-button>
+                  <a-button size="small" danger @click="deleteTarget = { stage: 'scenarios', item: record }; deleteReason = ''"><DeleteOutlined /></a-button>
+                </a-space>
+              </template>
             </template>
           </a-table>
           <div class="muted" style="margin-top: 10px">
@@ -820,7 +946,7 @@ function showTestCaseWhy(testCase: TestCase): void {
               :regenerate-disabled="!actionAvailable('REGENERATE_TEST_CASES')"
               :approve-disabled="!selectedApprovableTestCaseIds.length"
               @approve="void reviewTestCases('APPROVE')"
-              @reject="void reviewTestCases('REJECT')"
+              @reject="openRejection('testcases')"
               @regenerate="regenerateTestCases"
             />
           </div>
@@ -859,7 +985,18 @@ function showTestCaseWhy(testCase: TestCase): void {
                 </a-space>
               </template>
               <template #extra>
-                <a-button type="link" @click.stop="showTestCaseWhy(testCase)"><BulbOutlined /> Why</a-button>
+                <a-space @click.stop>
+                  <WhyGeneratedPopover
+                    :identifier="`testcase-${testCase.id}`"
+                    :active-identifier="activeWhyIdentifier"
+                    :reason="testCase.generation_reason ?? `Generated from approved scenario ${testCase.scenario_id}`"
+                    :references="testCase.knowledge_references"
+                    :trace="[requirementQuery.data.value?.requirement_code ?? requirementId, testCase.scenario_id, testCase.test_case_code]"
+                    @activate="activeWhyIdentifier = $event"
+                  />
+                  <a-button size="small" @click="openEdit('testcases', testCase)"><EditOutlined /></a-button>
+                  <a-button size="small" danger @click="deleteTarget = { stage: 'testcases', item: testCase }; deleteReason = ''"><DeleteOutlined /></a-button>
+                </a-space>
               </template>
               <a-descriptions :column="{ xs: 1, md: 3 }" size="small" bordered style="margin-bottom: 16px">
                 <a-descriptions-item label="Scenario"><span class="mono">{{ testCase.scenario_id }}</span></a-descriptions-item>
@@ -869,6 +1006,7 @@ function showTestCaseWhy(testCase: TestCase): void {
                 <a-descriptions-item label="Configuration">{{ recordText(testCase.configuration) }}</a-descriptions-item>
                 <a-descriptions-item label="Test Data">{{ recordText(testCase.test_data) }}</a-descriptions-item>
               </a-descriptions>
+              <a-alert v-if="testCase.rejection_reason" type="error" show-icon :message="`拒绝原因：${testCase.rejection_reason}`" :description="testCase.rejection_note || undefined" style="margin-bottom: 16px" />
               <a-table
                 :data-source="testCase.steps"
                 :pagination="false"
@@ -949,13 +1087,67 @@ function showTestCaseWhy(testCase: TestCase): void {
     </a-tab-pane>
   </a-tabs>
 
-  <WhyGeneratedDrawer
-    v-model:open="whyOpen"
-    :title="whyTitle"
-    :reason="whyReason"
-    :references="whyReferences"
-    :trace="whyTrace"
-  />
+  <a-modal :open="Boolean(rejectionStage)" title="填写拒绝原因" ok-text="确认拒绝" ok-type="danger" @ok="void submitRejection()" @cancel="rejectionStage = null">
+    <a-form layout="vertical">
+      <a-form-item label="拒绝原因" required>
+        <a-select v-model:value="rejectionReason" placeholder="请选择">
+          <a-select-option value="INCORRECT">内容不正确</a-select-option>
+          <a-select-option value="IRRELEVANT">与需求无关</a-select-option>
+          <a-select-option value="DUPLICATE">重复内容</a-select-option>
+          <a-select-option value="INSUFFICIENT_EVIDENCE">依据不足</a-select-option>
+          <a-select-option value="CONFLICTS_WITH_KNOWLEDGE">与 Product Knowledge 冲突</a-select-option>
+          <a-select-option value="WRONG_GRANULARITY">粒度不合适</a-select-option>
+          <a-select-option value="OTHER">其他</a-select-option>
+        </a-select>
+      </a-form-item>
+      <a-form-item label="补充说明" :required="rejectionReason === 'OTHER'">
+        <a-textarea v-model:value="rejectionNote" :rows="4" maxlength="2000" show-count />
+      </a-form-item>
+    </a-form>
+  </a-modal>
+
+  <a-modal :open="Boolean(deleteTarget)" title="删除内容" ok-text="确认删除" ok-type="danger" @ok="void submitDelete()" @cancel="deleteTarget = null">
+    <a-alert type="warning" show-icon message="删除后将从工作区隐藏，相关下游内容会标记为过期；审计数据仍会保留。" />
+    <a-form layout="vertical" style="margin-top: 16px"><a-form-item label="删除原因" required><a-textarea v-model:value="deleteReason" :rows="3" maxlength="2000" /></a-form-item></a-form>
+  </a-modal>
+
+  <a-drawer :open="Boolean(editing)" :title="`编辑 ${editing?.stage ?? ''}`" width="640" @close="editing = null">
+    <a-form v-if="editing" layout="vertical">
+      <template v-if="editing.stage === 'analysis'">
+        <a-form-item label="Summary" required><a-textarea v-model:value="editForm.summary" :rows="4" /></a-form-item>
+        <a-form-item label="Ambiguities（JSON 数组）"><a-textarea v-model:value="editForm.ambiguities" :rows="7" class="mono" /></a-form-item>
+        <a-form-item label="Atomic Assertions（JSON 数组）"><a-textarea v-model:value="editForm.assertions" :rows="12" class="mono" /></a-form-item>
+      </template>
+      <template v-else-if="editing.stage === 'risks'">
+        <a-form-item label="标题" required><a-input v-model:value="editForm.title" /></a-form-item>
+        <a-form-item label="描述" required><a-textarea v-model:value="editForm.description" :rows="4" /></a-form-item>
+        <a-form-item label="可能性"><a-input v-model:value="editForm.likelihood" /></a-form-item>
+        <a-form-item label="影响"><a-input v-model:value="editForm.impact" /></a-form-item>
+        <a-form-item label="分析依据"><a-textarea v-model:value="editForm.rationale" :rows="4" /></a-form-item>
+      </template>
+      <template v-else-if="editing.stage === 'scenarios'">
+        <a-form-item label="标题" required><a-input v-model:value="editForm.title" /></a-form-item>
+        <a-form-item label="测试意图" required><a-textarea v-model:value="editForm.intent" :rows="4" /></a-form-item>
+        <a-form-item label="类型"><a-input v-model:value="editForm.category" /></a-form-item>
+        <a-form-item label="前置条件（每行一项）"><a-textarea v-model:value="editForm.preconditions" :rows="3" /></a-form-item>
+        <a-form-item label="Expected Result"><a-textarea v-model:value="editForm.expected_result" :rows="3" /></a-form-item>
+        <a-form-item label="Expected Result 状态"><a-select v-model:value="editForm.expected_result_status"><a-select-option value="DEFINED">已定义</a-select-option><a-select-option value="CLARIFICATION_REQUIRED">需要澄清</a-select-option></a-select></a-form-item>
+        <a-form-item label="待澄清问题（每行一项）"><a-textarea v-model:value="editForm.blocking_questions" :rows="3" /></a-form-item>
+      </template>
+      <template v-else>
+        <a-form-item label="标题" required><a-input v-model:value="editForm.title" /></a-form-item>
+        <a-form-item label="目标" required><a-textarea v-model:value="editForm.objective" :rows="3" /></a-form-item>
+        <a-form-item label="前置条件（每行一项）"><a-textarea v-model:value="editForm.preconditions" :rows="3" /></a-form-item>
+        <a-form-item label="Configuration（JSON）"><a-textarea v-model:value="editForm.configuration" :rows="5" class="mono" /></a-form-item>
+        <a-form-item label="Expected Result"><a-textarea v-model:value="editForm.expected_result" :rows="3" /></a-form-item>
+        <a-form-item label="Expected Result 状态"><a-select v-model:value="editForm.expected_result_status"><a-select-option value="DEFINED">已定义</a-select-option><a-select-option value="CLARIFICATION_REQUIRED">需要澄清</a-select-option></a-select></a-form-item>
+        <a-form-item label="步骤（JSON 数组）"><a-textarea v-model:value="editForm.steps" :rows="12" class="mono" /></a-form-item>
+        <a-form-item label="待澄清问题（每行一项）"><a-textarea v-model:value="editForm.blocking_questions" :rows="3" /></a-form-item>
+      </template>
+      <a-space><a-button type="primary" :loading="busyAction?.endsWith('-edit')" @click="void saveEdit()">保存修改</a-button><a-button @click="editing = null">取消</a-button></a-space>
+    </a-form>
+  </a-drawer>
+
 </template>
 
 <style scoped>
@@ -971,5 +1163,15 @@ function showTestCaseWhy(testCase: TestCase): void {
   background: #f8f7ff;
   font-size: 15px;
   line-height: 1.75;
+}
+
+.selection-summary {
+  margin-top: 10px;
+}
+
+.rejection-feedback {
+  margin-top: 4px;
+  color: #ef4444;
+  font-size: 12px;
 }
 </style>

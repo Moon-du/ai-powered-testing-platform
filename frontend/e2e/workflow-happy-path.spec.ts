@@ -527,6 +527,16 @@ test('moves a seeded requirement through the human-review gates to traceable tes
   await page.getByRole('tab', { name: 'Risks' }).click()
   panel = page.locator('.ant-tabs-tabpane-active')
   await expect(panel.getByText('Displayed volume differs from selected value')).toBeVisible()
+  await expect(panel.getByRole('checkbox', { name: '选择 Risk RISK-VOLUME-001' })).toBeChecked()
+  await panel.getByRole('button', { name: 'Why Generated' }).click()
+  await expect(page.getByText('生成依据')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.body.style.overflow)).not.toBe('hidden')
+  await expect.poll(() => page.locator('.ant-popover:visible').evaluate((element) => {
+    const bounds = element.getBoundingClientRect()
+    return bounds.left >= 0 && bounds.right <= window.innerWidth
+  })).toBe(true)
+  await page.getByRole('heading', { name: requirement.title }).click()
+  await expect(page.locator('.ant-popover:visible')).toHaveCount(0)
   await expect(panel.getByRole('button', { name: '生成 Scenarios' })).toBeDisabled()
 
   await panel.getByRole('button', { name: /批\s*准/ }).click()
@@ -539,6 +549,14 @@ test('moves a seeded requirement through the human-review gates to traceable tes
   panel = page.locator('.ant-tabs-tabpane-active')
   await expect(panel.getByText('Set a nominal aspiration volume')).toBeVisible()
   await expect(panel.getByRole('button', { name: '生成 Test Cases' })).toBeDisabled()
+
+  const scenarioWhyButtons = panel.getByRole('button', { name: 'Why Generated' })
+  await scenarioWhyButtons.nth(0).click()
+  await expect(page.locator('.ant-popover:visible')).toHaveCount(1)
+  await scenarioWhyButtons.nth(1).click()
+  const activePopover = page.locator('.ant-popover:visible:not(.ant-zoom-big-leave)')
+  await expect(activePopover).toHaveCount(1)
+  await expect(activePopover).toContainText('SCN-VOLUME-MIN')
 
   await panel
     .getByRole('checkbox', { name: '选择 Scenario SCN-VOLUME-BELOW' })
@@ -566,8 +584,9 @@ test('moves a seeded requirement through the human-review gates to traceable tes
   ])
 
   await page.getByRole('tab', { name: 'Test Cases' }).click()
+  await expect(page.locator('.ant-popover:visible')).toHaveCount(0)
   panel = page.locator('.ant-tabs-tabpane-active')
-  await expect(panel.getByText('TC-VOLUME-NOMINAL')).toBeVisible()
+  await expect(panel.getByText('TC-VOLUME-NOMINAL').first()).toBeVisible()
   await expect(panel.getByText('Configure and verify 100.0 µL')).toBeVisible()
   await expect(panel.getByText('Restart after selecting 100.0 µL')).toBeVisible()
   await expect(panel.getByText('2 个 Expected Result 需要澄清')).toBeVisible()
@@ -576,6 +595,9 @@ test('moves a seeded requirement through the human-review gates to traceable tes
   await expect(panel.getByText('pipette mode: aspirate')).toBeVisible()
   await expect(panel.getByText('target volume: 100.0 µL')).toBeVisible()
   await expect(panel.getByText('The display shows 100.0 µL.')).toBeVisible()
+  await panel.getByRole('button', { name: 'Why Generated' }).first().click()
+  await expect(page.getByText('Implements the approved nominal volume scenario.')).toBeVisible()
+  await expect.poll(() => page.evaluate(() => document.body.style.overflow)).not.toBe('hidden')
   await panel.getByRole('button', { name: /批\s*准/ }).click()
   await expect.poll(() => state.approvedTestCaseIds.length).toBe(3)
   expect(selections.testCases).toEqual([

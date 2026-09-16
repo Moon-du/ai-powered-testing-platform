@@ -49,6 +49,16 @@ class ReviewAction(StrEnum):
     REJECT = "REJECT"
 
 
+class RejectionReason(StrEnum):
+    INCORRECT = "INCORRECT"
+    IRRELEVANT = "IRRELEVANT"
+    DUPLICATE = "DUPLICATE"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    CONFLICTS_WITH_KNOWLEDGE = "CONFLICTS_WITH_KNOWLEDGE"
+    WRONG_GRANULARITY = "WRONG_GRANULARITY"
+    OTHER = "OTHER"
+
+
 class ConstraintSpec(BaseModel):
     minimum: float | None = None
     maximum: float | None = None
@@ -158,12 +168,19 @@ class ProductTypeRead(ORMModel):
 class KnowledgePackRead(ORMModel):
     id: str
     tenant_id: str
-    product_type_id: str
+    product_type_id: str | None
     name: str
     version: str
     status: str
     description: str | None = None
     summary: dict[str, int] | None = None
+
+
+class KnowledgeItemUpdate(BaseModel):
+    item_type: str = Field(min_length=1, max_length=40)
+    title: str = Field(min_length=1, max_length=240)
+    content: str = Field(min_length=1)
+    parent_code: str | None = Field(default=None, max_length=80)
 
 
 class KnowledgeItemRead(ORMModel):
@@ -177,9 +194,9 @@ class KnowledgeItemRead(ORMModel):
 
 class KnowledgeContextRead(BaseModel):
     project_id: str
-    knowledge_pack_id: str
-    knowledge_pack_version: str
-    knowledge_pack: KnowledgePackRead
+    knowledge_pack_id: str | None
+    knowledge_pack_version: str | None
+    knowledge_pack: KnowledgePackRead | None
     project_context: "ProjectContextRead"
     items: list[KnowledgeItemRead]
     item_counts: dict[str, int]
@@ -200,8 +217,8 @@ class ProjectCreate(BaseModel):
     product_type_id: str | None = None
     product_type_code: str | None = None
     knowledge_pack_id: str | None = None
-    knowledge_pack_version: str = "1.0"
-    product_variant: str = "Electronic Pipette"
+    knowledge_pack_version: str | None = None
+    product_variant: str = ""
     project_version: str = "1.0"
     context_items: dict[str, Any] = Field(default_factory=dict)
 
@@ -212,10 +229,10 @@ class ProjectRead(ORMModel):
     project_code: str
     name: str
     description: str
-    product_type_id: str
+    product_type_id: str | None
     product_type: ProductTypeRead | None = None
-    knowledge_pack_id: str
-    knowledge_pack_version: str
+    knowledge_pack_id: str | None
+    knowledge_pack_version: str | None
     product_variant: str
     project_version: str
     status: str
@@ -332,6 +349,8 @@ class AnalysisRead(ORMModel):
     summary: str
     ambiguities_json: list[dict[str, Any]]
     why_generated: str
+    rejection_reason: RejectionReason | None = None
+    rejection_note: str | None = None
     supersedes_id: str | None
     created_at: datetime
     updated_at: datetime
@@ -342,6 +361,34 @@ class AnalysisRead(ORMModel):
 class AnalysisReview(BaseModel):
     action: ReviewAction
     expected_revision: int = Field(ge=1)
+    rejection_reason: RejectionReason | None = None
+    rejection_note: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_rejection_reason(self) -> "AnalysisReview":
+        if self.action == ReviewAction.REJECT and self.rejection_reason is None:
+            raise ValueError("rejection_reason is required when rejecting")
+        return self
+
+
+class AssertionUpdate(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    text: str = Field(min_length=1)
+    constraint_json: dict[str, Any] = Field(default_factory=dict)
+    source_span: str = Field(min_length=1)
+
+
+class AnalysisUpdate(BaseModel):
+    summary: str | None = Field(default=None, min_length=1)
+    ambiguities: list[dict[str, Any]] | None = None
+    why_generated: str | None = Field(default=None, min_length=1)
+    assertions: list[AssertionUpdate] | None = None
+    expected_revision: int = Field(ge=1)
+
+
+class AssetDelete(BaseModel):
+    expected_revision: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class AnalysisOptions(StrictRequestModel):
@@ -560,6 +607,8 @@ class RiskRead(ORMModel):
     why_generated: str
     status: AssetStatus
     asset_revision: int
+    rejection_reason: RejectionReason | None = None
+    rejection_note: str | None = None
     knowledge_references: list[KnowledgeReferenceRead] = Field(default_factory=list)
 
     @computed_field
@@ -614,6 +663,8 @@ class ScenarioRead(ORMModel):
     why_generated: str
     status: AssetStatus
     asset_revision: int
+    rejection_reason: RejectionReason | None = None
+    rejection_note: str | None = None
     knowledge_references: list[KnowledgeReferenceRead] = Field(default_factory=list)
 
     @computed_field
@@ -678,6 +729,8 @@ class TestCaseRead(ORMModel):
     why_generated: str
     status: AssetStatus
     asset_revision: int
+    rejection_reason: RejectionReason | None = None
+    rejection_note: str | None = None
     steps: list[TestStepRead] = Field(default_factory=list)
     knowledge_references: list[KnowledgeReferenceRead] = Field(default_factory=list)
 
@@ -717,7 +770,14 @@ class TestCaseUpdate(BaseModel):
     expected_result: str | None = None
     expected_result_status: ExpectedResultStatus | None = None
     blocking_questions: list[str] | None = None
+    steps: list["TestStepUpdate"] | None = None
     expected_revision: int = Field(ge=1)
+
+
+class TestStepUpdate(BaseModel):
+    action: str = Field(min_length=1)
+    expected_result: str | None = None
+    test_data: dict[str, Any] = Field(default_factory=dict)
 
 
 class BatchReview(BaseModel):
@@ -726,6 +786,14 @@ class BatchReview(BaseModel):
     scenario_ids: list[str] = Field(default_factory=list)
     test_case_ids: list[str] = Field(default_factory=list)
     expected_revisions: dict[str, int]
+    rejection_reason: RejectionReason | None = None
+    rejection_note: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_rejection_reason(self) -> "BatchReview":
+        if self.action == ReviewAction.REJECT and self.rejection_reason is None:
+            raise ValueError("rejection_reason is required when rejecting")
+        return self
 
 
 class WorkflowRead(BaseModel):

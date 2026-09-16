@@ -29,8 +29,12 @@ import type {
   ProjectContextResponse,
   Requirement,
   RequirementAnalysis,
+  RequirementRisk,
+  RejectionFeedback,
   RiskBatch,
   ScenarioBatch,
+  TestScenario,
+  TestCase,
   TestCaseBatch,
   TraceabilityResponse,
   WorkflowState,
@@ -58,6 +62,9 @@ export function configureApiRequestContext(provider: () => ApiRequestContext): v
 }
 
 api.interceptors.request.use((config) => {
+  if (config.data instanceof FormData) {
+    config.headers.delete('Content-Type')
+  }
   const context = requestContextProvider()
   if (context.accessToken) {
     config.headers.set('Authorization', `Bearer ${context.accessToken}`)
@@ -74,7 +81,7 @@ api.interceptors.request.use((config) => {
     )
     config.headers.set(
       'X-Tenant-Id',
-      context.tenantId ?? import.meta.env.VITE_DEV_TENANT_ID ?? 'demo-tenant',
+      context.tenantId ?? import.meta.env.VITE_DEV_TENANT_ID ?? 'local-tenant',
     )
   }
   return config
@@ -164,19 +171,61 @@ export const platformApi = {
     }
   },
 
+  async uploadProjectKnowledge(
+    projectId: string,
+    files: File[],
+    bumpVersion: boolean,
+  ): Promise<KnowledgeContextSummary> {
+    const body = new FormData()
+    files.forEach((file) => body.append('files', file))
+    const { data } = await api.post<unknown>(
+      `/projects/${projectId}/knowledge/files?bump_version=${bumpVersion}`,
+      body,
+    )
+    return normalizeKnowledgeContext(data)
+  },
+
+  async updateProjectKnowledgeItem(
+    projectId: string,
+    code: string,
+    input: { item_type: string; title: string; content: string; parent_code?: string | null },
+    bumpVersion: boolean,
+  ): Promise<KnowledgeContextSummary> {
+    const { data } = await api.put<unknown>(
+      `/projects/${projectId}/knowledge/items/${encodeURIComponent(code)}?bump_version=${bumpVersion}`,
+      input,
+    )
+    return normalizeKnowledgeContext(data)
+  },
+
+  async deleteProjectKnowledgeItem(
+    projectId: string,
+    code: string,
+    bumpVersion: boolean,
+  ): Promise<KnowledgeContextSummary> {
+    const { data } = await api.delete<unknown>(
+      `/projects/${projectId}/knowledge/items/${encodeURIComponent(code)}?bump_version=${bumpVersion}`,
+    )
+    return normalizeKnowledgeContext(data)
+  },
+
   async createProject(input: {
     project_code: string
     name: string
     description?: string
-    product_type_id: string
+    product_type_id?: string
     product_type_code?: string
-    knowledge_pack_id: string
-    knowledge_pack_version: string
+    knowledge_pack_id?: string
+    knowledge_pack_version?: string
     product_variant?: string
     project_version?: string
   }): Promise<Project> {
     const { data } = await api.post<unknown>('/projects', input)
     return normalizeProject(data)
+  },
+
+  async deleteProject(projectId: string): Promise<void> {
+    await api.delete(`/projects/${projectId}`)
   },
 
   async listRequirements(projectId: string): Promise<Requirement[]> {
@@ -236,8 +285,9 @@ export const platformApi = {
     requirementId: string,
     analysis: RequirementAnalysis,
     action: 'APPROVE' | 'REJECT',
+    feedback?: RejectionFeedback,
   ): Promise<RequirementAnalysis> {
-    const payload = { action, expected_revision: analysis.revision }
+    const payload = { action, expected_revision: analysis.revision, rejection_reason: feedback?.reason, rejection_note: feedback?.note }
     const data = await fallbackOn404(
       async () =>
         (await api.patch<unknown>(`/requirements/${requirementId}/analyses/${analysis.id}/review`, payload))
@@ -245,6 +295,15 @@ export const platformApi = {
       async () => (await api.post<unknown>(`/analyses/${analysis.id}/review`, payload)).data,
     )
     return normalizeAnalysis(data)
+  },
+
+  async updateAnalysis(analysis: RequirementAnalysis, input: Record<string, unknown>): Promise<RequirementAnalysis> {
+    const { data } = await api.patch<unknown>(`/analyses/${analysis.id}`, { ...input, expected_revision: analysis.revision })
+    return normalizeAnalysis(data)
+  },
+
+  async deleteAnalysis(analysis: RequirementAnalysis, reason: string): Promise<void> {
+    await api.delete(`/analyses/${analysis.id}`, { data: { expected_revision: analysis.revision, reason } })
   },
 
   async regenerateAnalysis(
@@ -298,13 +357,31 @@ export const platformApi = {
     return normalizeRiskBatch(data)
   },
 
-  async reviewRiskBatch(batch: RiskBatch, action: 'APPROVE' | 'REJECT'): Promise<RiskBatch> {
+  async reviewRiskBatch(
+    batch: RiskBatch,
+    action: 'APPROVE' | 'REJECT',
+    riskIds: string[] = batch.risks.map((risk) => risk.id),
+    feedback?: RejectionFeedback,
+  ): Promise<RiskBatch> {
     const { data } = await api.post<unknown>(`/risk-batches/${batch.id}/review`, {
       action,
-      risk_ids: batch.risks.map((risk) => risk.id),
-      expected_revisions: Object.fromEntries(batch.risks.map((risk) => [risk.id, risk.revision])),
+      risk_ids: riskIds,
+      expected_revisions: Object.fromEntries(
+        batch.risks.filter((risk) => riskIds.includes(risk.id)).map((risk) => [risk.id, risk.revision]),
+      ),
+      rejection_reason: feedback?.reason,
+      rejection_note: feedback?.note,
     })
     return normalizeRiskBatch(data)
+  },
+
+  async updateRisk(risk: RequirementRisk, input: Record<string, unknown>): Promise<RequirementRisk> {
+    const { data } = await api.patch<unknown>(`/risks/${risk.id}`, { ...input, expected_revision: risk.revision })
+    return normalizeRiskBatch({ id: 'single', revision: 1, items: [data] }).risks[0]!
+  },
+
+  async deleteRisk(risk: RequirementRisk, reason: string): Promise<void> {
+    await api.delete(`/risks/${risk.id}`, { data: { expected_revision: risk.revision, reason } })
   },
 
   async regenerateRiskBatch(batch: RiskBatch, feedback?: string): Promise<AiRun> {
@@ -375,6 +452,7 @@ export const platformApi = {
     batch: ScenarioBatch,
     action: 'APPROVE' | 'REJECT',
     scenarioIds: string[],
+    feedback?: RejectionFeedback,
   ): Promise<ScenarioBatch> {
     const selected = new Set(scenarioIds)
     const { data } = await api.post<unknown>(`/scenario-batches/${batch.id}/review`, {
@@ -385,8 +463,19 @@ export const platformApi = {
           .filter((scenario) => selected.has(scenario.id))
           .map((scenario) => [scenario.id, scenario.revision]),
       ),
+      rejection_reason: feedback?.reason,
+      rejection_note: feedback?.note,
     })
     return normalizeScenarioBatch(data)
+  },
+
+  async updateScenario(scenario: TestScenario, input: Record<string, unknown>): Promise<TestScenario> {
+    const { data } = await api.patch<unknown>(`/scenarios/${scenario.id}`, { ...input, expected_revision: scenario.revision })
+    return normalizeScenarioBatch({ id: 'single', revision: 1, items: [data] }).scenarios[0]!
+  },
+
+  async deleteScenario(scenario: TestScenario, reason: string): Promise<void> {
+    await api.delete(`/scenarios/${scenario.id}`, { data: { expected_revision: scenario.revision, reason } })
   },
 
   async regenerateScenarioBatch(batch: ScenarioBatch, feedback?: string): Promise<AiRun> {
@@ -458,6 +547,7 @@ export const platformApi = {
     batch: TestCaseBatch,
     action: 'APPROVE' | 'REJECT',
     testCaseIds: string[],
+    feedback?: RejectionFeedback,
   ): Promise<TestCaseBatch> {
     const selected = new Set(testCaseIds)
     const payload = {
@@ -468,12 +558,23 @@ export const platformApi = {
           .filter((testCase) => selected.has(testCase.id))
           .map((testCase) => [testCase.id, testCase.revision]),
       ),
+      rejection_reason: feedback?.reason,
+      rejection_note: feedback?.note,
     }
     const data = await fallbackOn404(
       async () => (await api.post<unknown>(`/testcase-batches/${batch.id}/review`, payload)).data,
       async () => (await api.post<unknown>(`/test-case-batches/${batch.id}/review`, payload)).data,
     )
     return normalizeTestCaseBatch(data)
+  },
+
+  async updateTestCase(testCase: TestCase, input: Record<string, unknown>): Promise<TestCase> {
+    const { data } = await api.patch<unknown>(`/test-cases/${testCase.id}`, { ...input, expected_revision: testCase.revision })
+    return normalizeTestCaseBatch({ id: 'single', revision: 1, items: [data] }).test_cases[0]!
+  },
+
+  async deleteTestCase(testCase: TestCase, reason: string): Promise<void> {
+    await api.delete(`/test-cases/${testCase.id}`, { data: { expected_revision: testCase.revision, reason } })
   },
 
   async regenerateTestCaseBatch(batch: TestCaseBatch, feedback?: string): Promise<AiRun> {

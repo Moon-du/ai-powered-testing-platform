@@ -39,9 +39,7 @@ defineEmits<{
     >
       批准
     </a-button>
-    <a-popconfirm title="确认拒绝当前版本？" ok-text="拒绝" cancel-text="取消" @confirm="$emit('reject')">
-      <a-button danger :disabled="disabled || reviewDisabled || loading || status === 'REJECTED'">拒绝</a-button>
-    </a-popconfirm>
+    <a-button danger :disabled="disabled || reviewDisabled || loading || status === 'REJECTED'" @click="$emit('reject')">拒绝</a-button>
     <a-button v-if="regenerate" :disabled="disabled || regenerateDisabled || loading" @click="$emit('regenerate')">
       重新生成
     </a-button>

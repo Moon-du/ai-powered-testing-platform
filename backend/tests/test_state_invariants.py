@@ -42,7 +42,7 @@ def test_rejecting_approved_analysis_stales_all_downstream(
     ).json()
     rejected = client.post(
         f"/api/v1/analyses/{analysis['id']}/review",
-        json={"action": "REJECT", "expected_revision": analysis["asset_revision"]},
+        json={"action": "REJECT", "expected_revision": analysis["asset_revision"], "rejection_reason": "INCORRECT"},
     )
     assert rejected.status_code == 200, rejected.text
     assert rejected.json()["status"] == "REJECTED"
@@ -75,6 +75,7 @@ def test_rejecting_approved_risk_stales_scenarios_and_cases(
         f"/api/v1/risk-batches/{risk_batch['id']}/review",
         json={
             "action": "REJECT",
+            "rejection_reason": "INCORRECT",
             "risk_ids": [boundary["id"]],
             "expected_revisions": {boundary["id"]: boundary["asset_revision"]},
         },
@@ -103,6 +104,7 @@ def test_rejecting_approved_scenario_stales_cases(
         f"/api/v1/scenario-batches/{fresh_scenarios['id']}/review",
         json={
             "action": "REJECT",
+            "rejection_reason": "INCORRECT",
             "scenario_ids": [fresh_nominal["id"]],
             "expected_revisions": {
                 fresh_nominal["id"]: fresh_nominal["asset_revision"]
@@ -212,6 +214,7 @@ def test_stale_propagation_includes_previously_rejected_assets(
         f"/api/v1/risk-batches/{batch['id']}/review",
         json={
             "action": "REJECT",
+            "rejection_reason": "INCORRECT",
             "risk_ids": [risk["id"]],
             "expected_revisions": {risk["id"]: risk["asset_revision"]},
         },

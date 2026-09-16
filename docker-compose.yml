@@ -57,6 +57,10 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      LLM_PROVIDER: deepseek
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
       WATCHFILES_FORCE_POLLING: "true"
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app"
     depends_on:
@@ -81,6 +85,10 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      LLM_PROVIDER: deepseek
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseek-flash}
       WATCHFILES_FORCE_POLLING: "true"
     command: sh -c 'watchfiles --filter python "celery -A app.ai.celery_app worker --loglevel=INFO" /app/app'
     depends_on:
@@ -105,7 +113,7 @@ services:
       VITE_ENABLE_DEV_HEADERS: ${VITE_ENABLE_DEV_HEADERS:-true}
       VITE_DEV_USER_ID: ${VITE_DEV_USER_ID:-dev-user}
       VITE_DEV_ACTOR_ROLE: ${VITE_DEV_ACTOR_ROLE:-OWNER}
-      VITE_DEV_TENANT_ID: ${VITE_DEV_TENANT_ID:-demo-tenant}
+      VITE_DEV_TENANT_ID: ${VITE_DEV_TENANT_ID:-local-tenant}
       CHOKIDAR_USEPOLLING: "true"
     depends_on:
       - backend

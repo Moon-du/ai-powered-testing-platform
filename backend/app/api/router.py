@@ -1,21 +1,29 @@
 from __future__ import annotations
 
+from io import BytesIO
+from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, Header, Request, status
+from docx import Document
+from fastapi import APIRouter, Body, Depends, File, Header, Query, Request, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.dependencies import Actor, get_current_actor, get_db
+from app.errors import AppError
 from app.repositories import DomainRepository
 from app.schemas.domain import (
     AnalysisRead,
     AnalysisReview,
+    AnalysisUpdate,
     AnalyzeRequest,
     BatchReview,
+    AssetDelete,
     CoverageRead,
     GenerateRequest,
     GenerationMode,
     KnowledgeContextRead,
+    KnowledgeItemUpdate,
     KnowledgePackList,
     KnowledgePackRead,
     ProjectContextRead,
@@ -57,7 +65,11 @@ IdempotencyKey = Annotated[str | None, Header(alias="Idempotency-Key")]
 
 
 def service(request: Request, db: Session) -> WorkflowService:
-    return WorkflowService(DomainRepository(db), request.app.state.settings)
+    return WorkflowService(
+        DomainRepository(db),
+        request.app.state.settings,
+        gateway=request.app.state.llm_gateway,
+    )
 
 
 @api_router.get("/product-types", response_model=ProductTypeList)
@@ -103,6 +115,13 @@ def get_project(
     return service(request, db).get_project(actor, project_id)
 
 
+@api_router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_project(
+    project_id: str, request: Request, actor: ActorDep, db: DbDep
+) -> None:
+    service(request, db).delete_project(actor, project_id)
+
+
 @api_router.get(
     "/projects/{project_id}/members", response_model=ProjectMembershipList
 )
@@ -141,6 +160,91 @@ def get_project_knowledge_context(
     project_id: str, request: Request, actor: ActorDep, db: DbDep
 ) -> KnowledgeContextRead:
     return service(request, db).knowledge_context(actor, project_id)
+
+
+@api_router.post("/projects/{project_id}/knowledge/files", response_model=KnowledgeContextRead)
+async def upload_project_knowledge(
+    project_id: str,
+    request: Request,
+    actor: ActorDep,
+    db: DbDep,
+    files: list[UploadFile] = File(...),
+    bump_version: bool = Query(False),
+) -> KnowledgeContextRead:
+    workflow = service(request, db)
+    if len(files) > 10:
+        raise AppError(422, "TOO_MANY_KNOWLEDGE_FILES", "每次最多上传 10 个文件。")
+    additions = []
+    for upload in files:
+        raw = await upload.read()
+        if len(raw) > 10 * 1024 * 1024:
+            raise AppError(413, "KNOWLEDGE_FILE_TOO_LARGE", "单个文件不能超过 10 MB。")
+        suffix = Path(upload.filename or "document").suffix.lower()
+        try:
+            if suffix in {".txt", ".md", ".markdown"}:
+                content = raw.decode("utf-8-sig")
+            elif suffix == ".docx":
+                content = "\n".join(
+                    paragraph.text
+                    for paragraph in Document(BytesIO(raw)).paragraphs
+                    if paragraph.text.strip()
+                )
+            elif (upload.content_type or "").startswith("image/"):
+                content = workflow.gateway.extract_image_text(
+                    raw, upload.content_type or "image/png"
+                )
+            else:
+                raise AppError(
+                    415,
+                    "KNOWLEDGE_FILE_UNSUPPORTED",
+                    "支持 TXT、Markdown、DOCX 和图片文件。",
+                )
+        except AppError:
+            raise
+        except (UnicodeDecodeError, ValueError, KeyError) as exc:
+            raise AppError(
+                422,
+                "KNOWLEDGE_FILE_INVALID",
+                f"无法读取文件 {upload.filename or 'document'}。",
+            ) from exc
+        if not content.strip():
+            raise AppError(422, "KNOWLEDGE_FILE_EMPTY", "上传文件中没有可提取的文本。")
+        additions.append({
+            "item_type": "DOCUMENT",
+            "code": f"DOC-{uuid4().hex[:12].upper()}",
+            "title": upload.filename or "Document",
+            "content": content.strip(),
+            "parent_code": None,
+            "metadata": {"source_filename": upload.filename, "content_type": upload.content_type},
+        })
+    return workflow.add_project_knowledge(actor, project_id, additions, bump_version)
+
+
+@api_router.put("/projects/{project_id}/knowledge/items/{code}", response_model=KnowledgeContextRead)
+def update_project_knowledge_item(
+    project_id: str,
+    code: str,
+    payload: KnowledgeItemUpdate,
+    request: Request,
+    actor: ActorDep,
+    db: DbDep,
+    bump_version: bool = Query(False),
+) -> KnowledgeContextRead:
+    return service(request, db).update_project_knowledge(
+        actor, project_id, code, payload, bump_version
+    )
+
+
+@api_router.delete("/projects/{project_id}/knowledge/items/{code}", response_model=KnowledgeContextRead)
+def delete_project_knowledge_item(
+    project_id: str,
+    code: str,
+    request: Request,
+    actor: ActorDep,
+    db: DbDep,
+    bump_version: bool = Query(False),
+) -> KnowledgeContextRead:
+    return service(request, db).delete_project_knowledge(actor, project_id, code, bump_version)
 
 
 @api_router.put("/projects/{project_id}/context", response_model=ProjectContextRead)
@@ -256,6 +360,20 @@ def review_analysis(
     return service(request, db).review_analysis(actor, analysis_id, payload)
 
 
+@api_router.patch("/analyses/{analysis_id}", response_model=AnalysisRead)
+def update_analysis(
+    analysis_id: str, payload: AnalysisUpdate, request: Request, actor: ActorDep, db: DbDep
+) -> AnalysisRead:
+    return service(request, db).update_analysis(actor, analysis_id, payload)
+
+
+@api_router.delete("/analyses/{analysis_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_analysis(
+    analysis_id: str, payload: AssetDelete, request: Request, actor: ActorDep, db: DbDep
+) -> None:
+    service(request, db).delete_analysis(actor, analysis_id, payload)
+
+
 @api_router.patch(
     "/requirements/{requirement_id}/analyses/{analysis_id}/review",
     response_model=AnalysisRead,
@@ -333,6 +451,13 @@ def update_risk(
     db: DbDep,
 ) -> RiskRead:
     return service(request, db).update_risk(actor, risk_id, payload)
+
+
+@api_router.delete("/risks/{risk_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_risk(
+    risk_id: str, payload: AssetDelete, request: Request, actor: ActorDep, db: DbDep
+) -> None:
+    service(request, db).delete_risk(actor, risk_id, payload)
 
 
 @api_router.patch("/risk-batches/{batch_id}/risks/{risk_id}", response_model=RiskRead)
@@ -422,6 +547,13 @@ def update_scenario(
     db: DbDep,
 ) -> ScenarioRead:
     return service(request, db).update_scenario(actor, scenario_id, payload)
+
+
+@api_router.delete("/scenarios/{scenario_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_scenario(
+    scenario_id: str, payload: AssetDelete, request: Request, actor: ActorDep, db: DbDep
+) -> None:
+    service(request, db).delete_scenario(actor, scenario_id, payload)
 
 
 @api_router.patch(
@@ -523,6 +655,13 @@ def update_test_case(
     db: DbDep,
 ) -> TestCaseRead:
     return service(request, db).update_test_case(actor, test_case_id, payload)
+
+
+@api_router.delete("/test-cases/{test_case_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_test_case(
+    test_case_id: str, payload: AssetDelete, request: Request, actor: ActorDep, db: DbDep
+) -> None:
+    service(request, db).delete_test_case(actor, test_case_id, payload)
 
 
 @api_router.patch(

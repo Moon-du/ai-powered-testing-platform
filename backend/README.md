@@ -13,22 +13,22 @@ python -m venv .venv
 python -m pip install -r requirements.lock
 python -m pip install -e . --no-deps
 $env:DATABASE_URL = "sqlite:///./local.db"
+$env:LLM_API_KEY = "your-deepseek-api-key"
 alembic upgrade head
-python -m app.seed
 uvicorn app.main:app --reload
 ```
 
 The default production-style database URL is PostgreSQL. Tests replace it with an
-isolated in-memory SQLite engine and do not require PostgreSQL, Redis, MinIO, or a
-real model:
+isolated in-memory SQLite engine and test gateway, and do not require PostgreSQL,
+Redis, MinIO, or a real model:
 
 ```powershell
 pytest
 ```
 
-Use `X-User-Id: dev-user` for the seeded project while development auth is enabled.
+Use the configured development identity headers while development auth is enabled.
 Generation endpoints always return HTTP 202 with an AI run. `AI_TASK_MODE=inline`
-runs the deterministic fake provider in-process; `celery` dispatches it to the worker.
+runs DeepSeek generation in-process; `celery` dispatches it to the worker.
 The browser supplies an `Idempotency-Key` for every generation action. The API replays
 an identical request for the same actor and rejects reuse of that key with different
 request content. It also rejects a second active run of the same type for a requirement,
@@ -40,18 +40,13 @@ Membership roles map to the PRD permission levels as follows: `EDITOR` is a
 generate/edit capability), `OWNER` has project-admin capability, and `VIEWER` is a
 read-only extension. Only `OWNER` may manage project membership.
 
-## Electronic Pipette demo
+## DeepSeek generation
 
-The idempotent seed creates tenant `demo-tenant`, project `EP-DEMO`, Knowledge Pack
-EP `1.0`, and requirement `EP-REQ-001`:
-
-> User can configure dispensing volume from 10 µL to 300 µL.
-
-The fake provider produces assertion A01, boundary and persistence-gap risks, and
-Nominal/Min/Max/Below/Above/Persistence scenarios. Below, Above, and Persistence
-remain `CLARIFICATION_REQUIRED` with a null expected result; review cannot approve
-the resulting Test Cases until a human supplies authoritative behavior. Scenarios
-may still be approved as reviewed test intent and passed through the strong Gate.
+The runtime uses DeepSeek's OpenAI-compatible `POST /chat/completions` endpoint.
+Each stage requests a JSON object matching the corresponding Pydantic schema.
+Responses are parsed and domain-validated before persistence. Undefined behavior
+must remain `CLARIFICATION_REQUIRED`; review cannot approve resulting Test Cases
+until a human supplies authoritative behavior.
 An approvable Test Case must include structured configuration and steps with non-empty
 action, test data, and expected result. Generation options that the deterministic P0
 provider does not implement are rejected with `GENERATION_OPTION_UNSUPPORTED` rather
@@ -75,7 +70,7 @@ downstream Test Cases stale.
 - Production OIDC/JWT verification is not included. Outside development mode the
   API rejects client-supplied identity headers with `OIDC_NOT_CONFIGURED` rather
   than trusting them.
-- Real LLM providers, embedding/pgvector retrieval, document import/OCR, export,
+- Embedding/pgvector retrieval, document import/OCR, export,
   MinIO artifacts, and TMS integration remain replaceable boundaries.
 - Celery dispatch is implemented without a transactional outbox; deployments that
   need guaranteed delivery should add an outbox before production use.

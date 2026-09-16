@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.ai import FakeLLMGateway
 from app.config import Settings
 from app.main import create_app
 from app.models import Base, Requirement
@@ -35,7 +36,11 @@ def client() -> Iterator[TestClient]:
         dev_auth_enabled=True,
         seed_demo=False,
     )
-    application = create_app(settings=settings, session_factory=factory)
+    application = create_app(
+        settings=settings,
+        session_factory=factory,
+        llm_gateway=FakeLLMGateway(),
+    )
     with TestClient(application) as test_client:
         test_client.headers.update(
             {"X-Tenant-Id": "demo-tenant", "X-User-Id": "dev-user"}
@@ -101,4 +106,3 @@ def progress_to_scenarios(client: TestClient, requirement_id: str) -> dict:
     return client.get(
         f"/api/v1/scenario-batches/{scenario_run.json()['result_id']}"
     ).json()
-

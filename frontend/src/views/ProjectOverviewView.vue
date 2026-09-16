@@ -2,14 +2,14 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
-import { BarChartOutlined, EditOutlined, FileAddOutlined } from '@ant-design/icons-vue'
-import { message } from 'ant-design-vue'
+import { BarChartOutlined, DeleteOutlined, EditOutlined, FileAddOutlined, SaveOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { message, Modal } from 'ant-design-vue'
 
 import { platformApi, readableApiError } from '@/api/client'
 import ErrorState from '@/components/common/ErrorState.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
-import type { ProjectContextItem, ProjectContextResponse } from '@/types'
+import type { KnowledgeContextSummary, ProjectContextItem, ProjectContextResponse } from '@/types'
 
 type EditableProjectContextItem = Omit<ProjectContextItem, 'value'> & { value: string }
 
@@ -18,6 +18,9 @@ const router = useRouter()
 const queryClient = useQueryClient()
 const projectId = String(route.params.projectId)
 const contextEditorOpen = ref(false)
+const knowledgeEditorOpen = ref(false)
+const knowledgeBusy = ref(false)
+const knowledgeDrafts = ref<Record<string, { item_type: string; title: string; content: string; parent_code?: string | null }>>({})
 const draftItems = ref<EditableProjectContextItem[]>([])
 
 const projectQuery = useQuery({
@@ -74,6 +77,61 @@ function openContextEditor(): void {
 function addContextItem(): void {
   draftItems.value.push({ context_type: 'Configuration', name: '', value: '', status: 'Active' })
 }
+
+function openKnowledgeEditor(): void {
+  knowledgeDrafts.value = Object.fromEntries((knowledgeQuery.data.value?.items ?? []).map((item) => [item.code, {
+    item_type: item.item_type, title: item.title, content: item.content, parent_code: item.parent_code,
+  }]))
+  knowledgeEditorOpen.value = true
+}
+
+function askVersionUpdate(): Promise<boolean> {
+  return new Promise((resolve) => Modal.confirm({
+    title: '是否更新 Knowledge Pack 版本？',
+    content: '“更新版本”会递增版本（例如 v1 → v2）；“沿用当前版本”仍保存本次修改。',
+    okText: '更新版本', cancelText: '沿用当前版本',
+    onOk: () => resolve(true), onCancel: () => resolve(false),
+  }))
+}
+
+async function applyKnowledgeResult(data: KnowledgeContextSummary): Promise<void> {
+  queryClient.setQueryData<KnowledgeContextSummary>(['knowledge-context', projectId], data)
+  await projectQuery.refetch()
+  openKnowledgeEditor()
+}
+
+async function uploadKnowledge(file: File): Promise<boolean> {
+  const bump = await askVersionUpdate()
+  knowledgeBusy.value = true
+  try {
+    await applyKnowledgeResult(await platformApi.uploadProjectKnowledge(projectId, [file], bump))
+    void message.success('Product Knowledge 已上传，仅影响当前项目')
+  } catch (error) { void message.error(readableApiError(error)) }
+  finally { knowledgeBusy.value = false }
+  return false
+}
+
+async function saveKnowledgeItem(code: string): Promise<void> {
+  const draft = knowledgeDrafts.value[code]
+  if (!draft) return
+  const bump = await askVersionUpdate()
+  knowledgeBusy.value = true
+  try {
+    await applyKnowledgeResult(await platformApi.updateProjectKnowledgeItem(projectId, code, draft, bump))
+    void message.success('Product Knowledge 已更新，仅影响当前项目')
+  } catch (error) { void message.error(readableApiError(error)) }
+  finally { knowledgeBusy.value = false }
+}
+
+async function deleteKnowledgeItem(code: string): Promise<void> {
+  const bump = await askVersionUpdate()
+  knowledgeBusy.value = true
+  try {
+    await applyKnowledgeResult(await platformApi.deleteProjectKnowledgeItem(projectId, code, bump))
+    void message.success('Product Knowledge 条目已删除，仅影响当前项目')
+  } catch (error) { void message.error(readableApiError(error)) }
+  finally { knowledgeBusy.value = false }
+}
 </script>
 
 <template>
@@ -107,11 +165,13 @@ function addContextItem(): void {
           <a-descriptions :column="1" bordered size="small">
             <a-descriptions-item label="Project Code"><span class="mono">{{ projectQuery.data.value.project_code }}</span></a-descriptions-item>
             <a-descriptions-item label="Product Type">
-              {{ projectQuery.data.value.product_type?.display_name ?? projectQuery.data.value.product_type_id }}
+              {{ projectQuery.data.value.product_type?.display_name ?? 'custom' }}
             </a-descriptions-item>
             <a-descriptions-item label="Knowledge Pack">
-              <a-tag color="geekblue">v{{ projectQuery.data.value.knowledge_pack_version }}</a-tag>
-              <span class="mono">{{ projectQuery.data.value.knowledge_pack_id }}</span>
+              <a-tag v-if="projectQuery.data.value.knowledge_pack_version" color="geekblue">
+                {{ projectQuery.data.value.knowledge_pack_version }}
+              </a-tag>
+              <span v-else>None</span>
             </a-descriptions-item>
             <a-descriptions-item label="Variant">{{ projectQuery.data.value.product_variant || '未指定' }}</a-descriptions-item>
             <a-descriptions-item label="项目版本">{{ projectQuery.data.value.project_version || '未指定' }}</a-descriptions-item>
@@ -122,7 +182,12 @@ function addContextItem(): void {
 
       <a-col :xs="24" :xl="14">
         <a-card title="Product Knowledge 摘要" class="surface-card" :bordered="false">
-          <template #extra><a-tag color="blue">项目只读</a-tag></template>
+          <template #extra>
+            <a-button @click="openKnowledgeEditor">
+              <template #icon><EditOutlined /></template>
+              管理 Product Knowledge
+            </a-button>
+          </template>
           <a-skeleton v-if="knowledgeQuery.isPending.value" active />
           <ErrorState
             v-else-if="knowledgeQuery.isError.value"
@@ -169,6 +234,31 @@ function addContextItem(): void {
       />
     </a-card>
   </template>
+
+  <a-drawer v-model:open="knowledgeEditorOpen" title="管理 Product Knowledge" width="min(820px, 94vw)">
+    <a-alert type="info" show-icon message="上传、编辑和删除仅影响当前项目，不会修改平台预置 Product Knowledge。" style="margin-bottom: 16px" />
+    <a-upload :show-upload-list="false" accept=".txt,.md,.markdown,.docx,image/png,image/jpeg,image/webp" :before-upload="uploadKnowledge">
+      <a-button :loading="knowledgeBusy" style="margin-bottom: 16px">
+        <template #icon><UploadOutlined /></template>上传文本、Word 或图片
+      </a-button>
+    </a-upload>
+    <a-empty v-if="!(knowledgeQuery.data.value?.items?.length)" description="Product Knowledge 为空" />
+    <a-space v-else direction="vertical" size="middle" style="width: 100%">
+      <a-card v-for="item in knowledgeQuery.data.value?.items" :key="item.code" size="small">
+        <a-form v-if="knowledgeDrafts[item.code]" layout="vertical">
+          <a-row :gutter="12">
+            <a-col :span="8"><a-form-item label="类型"><a-input v-model:value="knowledgeDrafts[item.code].item_type" /></a-form-item></a-col>
+            <a-col :span="16"><a-form-item label="标题"><a-input v-model:value="knowledgeDrafts[item.code].title" /></a-form-item></a-col>
+          </a-row>
+          <a-form-item label="内容"><a-textarea v-model:value="knowledgeDrafts[item.code].content" :rows="5" /></a-form-item>
+          <a-space>
+            <a-button type="primary" :loading="knowledgeBusy" @click="void saveKnowledgeItem(item.code)"><template #icon><SaveOutlined /></template>保存</a-button>
+            <a-button danger :disabled="knowledgeBusy" @click="void deleteKnowledgeItem(item.code)"><template #icon><DeleteOutlined /></template>删除</a-button>
+          </a-space>
+        </a-form>
+      </a-card>
+    </a-space>
+  </a-drawer>
 
   <a-drawer v-model:open="contextEditorOpen" title="编辑 Project Context" width="min(720px, 94vw)">
     <a-alert

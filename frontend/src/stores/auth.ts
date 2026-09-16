@@ -17,7 +17,7 @@ export const useAuthStore = defineStore('auth', () => {
     (import.meta.env.VITE_DEV_ACTOR_ROLE as ProjectRole | undefined) ?? 'OWNER',
   )
   const tenantId = ref(
-    import.meta.env.VITE_DEV_TENANT_ID ?? 'demo-tenant',
+    import.meta.env.VITE_DEV_TENANT_ID ?? 'local-tenant',
   )
 
   const displayRole = computed(() => actorRole.value.replaceAll('_', ' '))

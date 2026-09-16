@@ -47,6 +47,9 @@ class DomainRepository:
     def add_all(self, instances: Iterable[object]) -> None:
         self.session.add_all(list(instances))
 
+    def delete(self, instance: object) -> None:
+        self.session.delete(instance)
+
     def flush(self) -> None:
         self.session.flush()
 
@@ -332,6 +335,7 @@ class DomainRepository:
                 .where(
                     Analysis.tenant_id == tenant_id,
                     Analysis.requirement_id == requirement_id,
+                    Analysis.deleted_at.is_(None),
                 )
                 .order_by(Analysis.asset_revision)
             )
@@ -346,7 +350,9 @@ class DomainRepository:
     def analysis_internal(self, tenant_id: str, analysis_id: str) -> Analysis:
         item = self.session.scalar(
             select(Analysis).where(
-                Analysis.id == analysis_id, Analysis.tenant_id == tenant_id
+                Analysis.id == analysis_id,
+                Analysis.tenant_id == tenant_id,
+                Analysis.deleted_at.is_(None),
             )
         )
         if item is None:
@@ -397,7 +403,7 @@ class DomainRepository:
         return list(
             self.session.scalars(
                 select(Risk)
-                .where(Risk.tenant_id == tenant_id, Risk.batch_id == batch_id)
+                .where(Risk.tenant_id == tenant_id, Risk.batch_id == batch_id, Risk.deleted_at.is_(None))
                 .order_by(Risk.code)
             )
         )
@@ -442,7 +448,7 @@ class DomainRepository:
         return list(
             self.session.scalars(
                 select(Scenario)
-                .where(Scenario.tenant_id == tenant_id, Scenario.batch_id == batch_id)
+                .where(Scenario.tenant_id == tenant_id, Scenario.batch_id == batch_id, Scenario.deleted_at.is_(None))
                 .order_by(Scenario.code)
             )
         )
@@ -452,6 +458,7 @@ class DomainRepository:
             self.session.scalars(
                 select(Scenario).where(
                     Scenario.tenant_id == tenant_id, Scenario.risk_id == risk_id
+                    , Scenario.deleted_at.is_(None)
                 )
             )
         )
@@ -496,7 +503,7 @@ class DomainRepository:
         return list(
             self.session.scalars(
                 select(TestCase)
-                .where(TestCase.tenant_id == tenant_id, TestCase.batch_id == batch_id)
+                .where(TestCase.tenant_id == tenant_id, TestCase.batch_id == batch_id, TestCase.deleted_at.is_(None))
                 .order_by(TestCase.code)
             )
         )
@@ -509,6 +516,7 @@ class DomainRepository:
                 select(TestCase).where(
                     TestCase.tenant_id == tenant_id,
                     TestCase.scenario_id == scenario_id,
+                    TestCase.deleted_at.is_(None),
                 )
             )
         )
@@ -634,7 +642,9 @@ class DomainRepository:
         scoped = lambda model: list(
             self.session.scalars(
                 select(model).where(
-                    model.tenant_id == tenant, model.project_id == project_id
+                    model.tenant_id == tenant,
+                    model.project_id == project_id,
+                    *([model.deleted_at.is_(None)] if hasattr(model, "deleted_at") else []),
                 )
             )
         )
@@ -659,6 +669,7 @@ class DomainRepository:
         return int(current or 0) + 1
 
     def _scoped_asset(self, actor: Actor, model: type[ModelT], asset_id: str) -> ModelT | None:
+        active_clause = [model.deleted_at.is_(None)] if hasattr(model, "deleted_at") else []
         return self.session.scalar(
             select(model)
             .join(
@@ -672,5 +683,6 @@ class DomainRepository:
                 model.id == asset_id,
                 model.tenant_id == actor.tenant_id,
                 ProjectMembership.user_id == actor.user_id,
+                *active_clause,
             )
         )

@@ -23,8 +23,9 @@ def _config(database_path: Path, monkeypatch) -> tuple[Config, str]:
 
 def test_execution_ready_fields_migrate_fresh_and_legacy_schema(
     monkeypatch,
+    tmp_path: Path,
 ) -> None:
-    artifact_dir = Path(__file__).parents[1] / ".pytest_cache" / "migration-dbs"
+    artifact_dir = tmp_path / "migration-dbs"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     token = uuid4().hex
     fresh_path = artifact_dir / f"fresh-{token}.db"

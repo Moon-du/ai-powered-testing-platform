@@ -1,6 +1,6 @@
 # AI Powered Test Engineering Platform
 
-这是依据《AI 驱动的垂直产品测试工程平台开发总纲》实现的 P0 绿地工程。首个可验证切片聚焦 Electronic Pipette 的 Volume Setting 需求，并用确定性的 Fake LLM 跑通：
+这是依据《AI 驱动的垂直产品测试工程平台开发总纲》实现的 P0 绿地工程。平台通过 DeepSeek API 驱动以下强类型工作流：
 
 `Product Knowledge → Project Context → Requirement → Analysis → Risk → Scenario Review → Test Case → Traceability`
 
@@ -16,7 +16,7 @@
 - FastAPI/OpenAPI 后端和 Vue 3 工作台
 - PostgreSQL/pgvector、Redis/Celery、MinIO 的 Docker 本地环境
 
-真实模型、企业 OIDC、OCR、正式导出模板和完整 Knowledge Authoring Console 保留为可替换边界；首切片默认不依赖外部模型或企业凭据。
+企业 OIDC、OCR、正式导出模板和完整 Knowledge Authoring Console 仍是后续边界。
 
 ## 项目结构
 
@@ -29,7 +29,7 @@ docker-compose.prod.yml
 
 ## Docker 启动
 
-1. 复制 `.env.example` 为 `.env`，并为 `POSTGRES_PASSWORD`、`OBJECT_STORAGE_ACCESS_KEY`、`OBJECT_STORAGE_SECRET_KEY` 填入本机随机值。当前 Compose 会把 PostgreSQL 密码嵌入连接 URL，因此 `POSTGRES_PASSWORD` 请使用足够长的 URL-safe 字符（字母、数字、`_`、`-`），不要直接使用含 `@`、`:`、`/` 的原始密码。
+1. 复制 `.env.example` 为 `.env`，填写 `LLM_API_KEY`、`POSTGRES_PASSWORD`、`OBJECT_STORAGE_ACCESS_KEY` 和 `OBJECT_STORAGE_SECRET_KEY`。当前 Compose 会把 PostgreSQL 密码嵌入连接 URL，因此 `POSTGRES_PASSWORD` 请使用足够长的 URL-safe 字符（字母、数字、`_`、`-`）。DeepSeek 默认使用 `https://api.deepseek.com` 和 `deepseek-flash`。
 2. 首次运行 `docker compose up --build`。默认 Compose 是开发模式：FastAPI 使用 `--reload`，Vue 使用 Vite HMR，Celery worker 在 Python 文件变化时自动重启。
 3. 打开前端 `http://localhost:5173`；OpenAPI 位于 `http://localhost:8000/docs`。
 
@@ -41,19 +41,19 @@ docker-compose.prod.yml
 docker compose -f docker-compose.prod.yml up --build
 ```
 
-开发模式使用显式的开发认证适配器；部署到非开发环境前必须关闭 `DEV_AUTH_ENABLED`、关闭 `SEED_DEMO`，并配置 OIDC/JWT 校验。
+开发模式使用显式的开发认证适配器；部署到非开发环境前必须关闭 `DEV_AUTH_ENABLED` 并配置 OIDC/JWT 校验。
 Compose 的所有宿主机端口仅绑定 `127.0.0.1`，开发身份头和本地基础设施不会暴露到局域网。
 
 ## 本地开发
 
-后端和前端的独立安装、迁移、测试及启动命令分别记录在 `backend/README.md` 与 `frontend/README.md`。测试默认使用隔离的 SQLite 数据库和 Fake LLM，因此不需要真实模型、Redis 或对象存储。
+后端和前端的独立安装、迁移、测试及启动命令分别记录在 `backend/README.md` 与 `frontend/README.md`。自动化测试使用隔离的 SQLite 数据库和测试替身，不会调用真实 DeepSeek API。
 
 当前完成度、验证结果与后续 P0 backlog 见 `docs/p0-implementation-status.md`；需要业务方确认但不阻塞首切片的事项见 `docs/open-decisions.md`。
 
 ## 产品默认值
 
-- P0 首批仅 seed Electronic Pipette。
-- LLM provider 默认为 `fake`，业务代码只依赖 Gateway contract。
-- 检索先采用结构化筛选和确定性 seed；embedding/chunk 策略通过配置扩展。
+- 应用不再自动写入演示项目或 Knowledge Pack，业务数据需要显式导入或创建。
+- LLM provider 固定为 `deepseek`，缺少密钥时仅 AI 生成操作返回配置错误。
+- 检索采用当前项目绑定的 Knowledge Pack 结构化数据；embedding/chunk 策略通过配置扩展。
 - 导出采用平台自带列定义；接入现有 TMS 前再确认企业模板。
 - 生产 SSO、角色映射、领域 seed 审核和扫描件 OCR 仍需产品/架构团队确认。

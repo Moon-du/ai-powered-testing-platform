@@ -36,7 +36,7 @@ def get_current_actor(
     settings: Settings = request.app.state.settings
     if settings.app_env == "development" and settings.dev_auth_enabled:
         return Actor(
-            tenant_id=x_tenant_id or "demo-tenant",
+            tenant_id=x_tenant_id or "local-tenant",
             user_id=x_user_id or "dev-user",
         )
     raise AppError(

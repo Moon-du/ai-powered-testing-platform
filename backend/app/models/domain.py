@@ -54,8 +54,8 @@ class KnowledgePack(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     tenant_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
-    product_type_id: Mapped[str] = mapped_column(
-        ForeignKey("product_types.id", ondelete="RESTRICT"), nullable=False, index=True
+    product_type_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_types.id", ondelete="RESTRICT"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     version: Mapped[str] = mapped_column(String(40), nullable=False)
@@ -98,13 +98,13 @@ class Project(Base):
     project_code: Mapped[str] = mapped_column(String(100), nullable=False)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    product_type_id: Mapped[str] = mapped_column(
-        ForeignKey("product_types.id", ondelete="RESTRICT"), nullable=False, index=True
+    product_type_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_types.id", ondelete="RESTRICT"), nullable=True, index=True
     )
-    knowledge_pack_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_packs.id", ondelete="RESTRICT"), nullable=False, index=True
+    knowledge_pack_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_packs.id", ondelete="RESTRICT"), nullable=True, index=True
     )
-    knowledge_pack_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    knowledge_pack_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     product_variant: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     project_version: Mapped[str] = mapped_column(String(40), nullable=False, default="1.0")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE")
@@ -219,6 +219,11 @@ class Analysis(Base):
     )
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     why_generated: Mapped[str] = mapped_column(Text, nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String(80))
+    rejection_note: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[str | None] = mapped_column(String(200))
+    deletion_reason: Mapped[str | None] = mapped_column(Text)
     supersedes_id: Mapped[str | None] = mapped_column(
         ForeignKey("analyses.id", ondelete="SET NULL")
     )
@@ -307,6 +312,11 @@ class Risk(Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="AI_DRAFT")
     asset_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String(80))
+    rejection_note: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[str | None] = mapped_column(String(200))
+    deletion_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -373,6 +383,11 @@ class Scenario(Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="AI_DRAFT")
     asset_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String(80))
+    rejection_note: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[str | None] = mapped_column(String(200))
+    deletion_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -441,6 +456,11 @@ class TestCase(Base):
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="AI_DRAFT")
     asset_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     semantic_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(String(80))
+    rejection_note: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[str | None] = mapped_column(String(200))
+    deletion_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

@@ -1,7 +1,13 @@
 from __future__ import annotations
 
-from typing import Protocol
+import json
+import base64
+from typing import Any, Protocol, TypeVar
 
+import httpx
+from pydantic import BaseModel, TypeAdapter, ValidationError
+
+from app.config import Settings
 from app.errors import AppError
 from app.schemas.domain import (
     AnalysisDraft,
@@ -51,6 +57,207 @@ class LLMGateway(Protocol):
         self, scenarios: list[ScenarioDraft], knowledge: dict[str, str]
     ) -> list[TestCaseDraft]:
         ...
+
+    def extract_image_text(self, content: bytes, media_type: str) -> str:
+        ...
+
+
+DraftT = TypeVar("DraftT", bound=BaseModel)
+
+
+class DeepSeekLLMGateway:
+    """OpenAI-compatible DeepSeek gateway with strict structured-output parsing."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.api_key = (
+            settings.llm_api_key.get_secret_value().strip()
+            if settings.llm_api_key is not None
+            else ""
+        )
+        self.model = settings.llm_model
+        self.vision_model = settings.llm_vision_model
+        self.temperature = settings.llm_temperature
+        self.max_tokens = settings.llm_max_tokens
+        self.client = httpx.Client(
+            base_url=settings.llm_base_url.rstrip("/"),
+            timeout=settings.llm_timeout_seconds,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+
+    def analyze(self, requirement_text: str, knowledge: dict[str, str]) -> AnalysisDraft:
+        payload = self._complete(
+            task="Analyze the immutable requirement into atomic, traceable assertions.",
+            schema=AnalysisDraft.model_json_schema(),
+            inputs={"requirement_text": requirement_text, "knowledge": knowledge},
+            rules=[
+                "Every assertion source_span must be an exact contiguous substring of requirement_text.",
+                "Do not invent product behavior. Record missing behavior as an ambiguity.",
+                "Use only knowledge reference codes that exist in the supplied knowledge object.",
+            ],
+        )
+        return self._validate(AnalysisDraft, payload)
+
+    def generate_risks(
+        self, analysis: AnalysisDraft, knowledge: dict[str, str]
+    ) -> list[RiskDraft]:
+        return self._complete_list(
+            RiskDraft,
+            task="Generate requirement-derived product and test risks.",
+            inputs={"analysis": analysis.model_dump(mode="json"), "knowledge": knowledge},
+            rules=[
+                "Each risk assertion_code must match an assertion code in analysis.",
+                "Do not invent product behavior; mark requirement_gap when behavior is unspecified.",
+                "Return at least one material risk.",
+            ],
+        )
+
+    def generate_scenarios(
+        self, risks: list[RiskDraft], knowledge: dict[str, str]
+    ) -> list[ScenarioDraft]:
+        return self._complete_list(
+            ScenarioDraft,
+            task="Generate executable test scenarios for the approved risks.",
+            inputs={
+                "risks": [item.model_dump(mode="json") for item in risks],
+                "knowledge": knowledge,
+            },
+            rules=[
+                "Each scenario risk_code must match a supplied risk code.",
+                "When expected behavior is absent, use CLARIFICATION_REQUIRED, expected_result null, and blocking_questions.",
+                "Do not convert an assumption into a defined expected result.",
+            ],
+        )
+
+    def generate_test_cases(
+        self, scenarios: list[ScenarioDraft], knowledge: dict[str, str]
+    ) -> list[TestCaseDraft]:
+        return self._complete_list(
+            TestCaseDraft,
+            task="Generate detailed, execution-ready test cases from approved scenarios.",
+            inputs={
+                "scenarios": [item.model_dump(mode="json") for item in scenarios],
+                "knowledge": knowledge,
+            },
+            rules=[
+                "Each test case scenario_code must match a supplied scenario code.",
+                "Include concrete configuration, ordered steps, and non-empty test_data for every step.",
+                "Preserve CLARIFICATION_REQUIRED where the scenario lacks a defined expected result.",
+            ],
+        )
+
+    def extract_image_text(self, content: bytes, media_type: str) -> str:
+        if not self.api_key:
+            raise AppError(503, "LLM_NOT_CONFIGURED", "LLM_API_KEY is required for image extraction.")
+        encoded = base64.b64encode(content).decode("ascii")
+        try:
+            response = self.client.post(
+                "/chat/completions",
+                json={
+                    "model": self.vision_model,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Extract all product and testing knowledge from this image faithfully. Return plain text only."},
+                            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{encoded}"}},
+                        ],
+                    }],
+                    "temperature": 0,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            return str(response.json()["choices"][0]["message"]["content"]).strip()
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise AppError(502, "IMAGE_EXTRACTION_FAILED", "DeepSeek could not extract the uploaded image.") from exc
+
+    def _complete_list(
+        self,
+        model: type[DraftT],
+        *,
+        task: str,
+        inputs: dict[str, Any],
+        rules: list[str],
+    ) -> list[DraftT]:
+        payload = self._complete(
+            task=task,
+            schema={
+                "type": "object",
+                "properties": {
+                    "items": {"type": "array", "items": model.model_json_schema()}
+                },
+                "required": ["items"],
+                "additionalProperties": False,
+            },
+            inputs=inputs,
+            rules=rules,
+        )
+        try:
+            return TypeAdapter(list[model]).validate_python(payload["items"])
+        except (KeyError, TypeError, ValidationError) as exc:
+            raise AppError(502, "AI_OUTPUT_INVALID", "DeepSeek returned an invalid structured response.") from exc
+
+    @staticmethod
+    def _validate(model: type[DraftT], payload: Any) -> DraftT:
+        try:
+            return model.model_validate(payload)
+        except ValidationError as exc:
+            raise AppError(502, "AI_OUTPUT_INVALID", "DeepSeek returned an invalid structured response.") from exc
+
+    def _complete(
+        self,
+        *,
+        task: str,
+        schema: dict[str, Any],
+        inputs: dict[str, Any],
+        rules: list[str],
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            raise AppError(
+                503,
+                "LLM_NOT_CONFIGURED",
+                "LLM_API_KEY is required for DeepSeek AI generation.",
+            )
+        system_prompt = (
+            "You are a senior test engineer. Return one JSON object only, without Markdown. "
+            "Follow the JSON schema exactly. Never fabricate requirements, expected behavior, "
+            "knowledge references, or approvals. Preserve the language used by the requirement."
+        )
+        user_prompt = json.dumps(
+            {"task": task, "rules": rules, "json_schema": schema, "inputs": inputs},
+            ensure_ascii=False,
+        )
+        try:
+            response = self.client.post(
+                "/chat/completions",
+                json={
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "stream": False,
+                },
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            payload = json.loads(content)
+            if not isinstance(payload, dict):
+                raise TypeError("Expected a JSON object")
+            return payload
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise AppError(502, "LLM_REQUEST_FAILED", "DeepSeek API request or response parsing failed.") from exc
+
+
+def build_llm_gateway(settings: Settings) -> LLMGateway:
+    if settings.llm_provider == "deepseek":
+        return DeepSeekLLMGateway(settings)
+    raise AppError(503, "LLM_NOT_CONFIGURED", f"Unsupported LLM provider: {settings.llm_provider}")
 
 
 class FakeLLMGateway:
@@ -292,6 +499,9 @@ class FakeLLMGateway:
                 )
             )
         return cases
+
+    def extract_image_text(self, content: bytes, media_type: str) -> str:
+        return "Image extraction test content."
 
 
 class DomainValidator:

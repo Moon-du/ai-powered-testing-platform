@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError
 
-from app.ai import DomainValidator, FakeLLMGateway, LLMGateway
+from app.ai import DomainValidator, LLMGateway, build_llm_gateway
 from app.config import Settings
 from app.dependencies import Actor
 from app.errors import AppError, gate_blocked, version_conflict
@@ -17,6 +18,8 @@ from app.models import (
     Analysis,
     AssetRelation,
     KnowledgeReference,
+    KnowledgeItem,
+    KnowledgePack,
     Project,
     ProjectContext,
     ProjectMembership,
@@ -36,10 +39,12 @@ from app.schemas.domain import (
     AnalysisDraft,
     AnalysisRead,
     AnalysisReview,
+    AnalysisUpdate,
     AnalyzeRequest,
     AssertionDraft,
     AssertionRead,
     AssetStatus,
+    AssetDelete,
     BatchReview,
     CoverageRead,
     ExpectedResultStatus,
@@ -48,6 +53,7 @@ from app.schemas.domain import (
     KnowledgeReferenceRead,
     KnowledgeContextRead,
     KnowledgeItemRead,
+    KnowledgeItemUpdate,
     KnowledgePackList,
     KnowledgePackRead,
     ProjectContextRead,
@@ -171,6 +177,8 @@ class KnowledgeRetriever:
         self.repository = repository
 
     def retrieve(self, tenant_id: str, project: Project) -> dict[str, str]:
+        if not project.knowledge_pack_id:
+            return {}
         return {
             item.code: item.content
             for item in self.repository.knowledge_items(
@@ -188,7 +196,7 @@ class WorkflowService:
     ) -> None:
         self.repo = repository
         self.settings = settings
-        self.gateway = gateway or FakeLLMGateway()
+        self.gateway = gateway or build_llm_gateway(settings)
         self.context_builder = ContextBuilder(repository)
         self.retriever = KnowledgeRetriever(repository)
 
@@ -239,47 +247,45 @@ class WorkflowService:
         )
 
     def create_project(self, actor: Actor, data: ProjectCreate) -> ProjectRead:
+        product = None
         if data.product_type_id:
             product = self.repo.product_type_by_id(
                 actor.tenant_id, data.product_type_id
             )
-        else:
+        elif data.product_type_code:
             product = self.repo.product_type(
                 actor.tenant_id,
-                data.product_type_code or "ELECTRONIC_PIPETTE",
+                data.product_type_code,
             )
-        if data.product_type_code and data.product_type_code != product.code:
+        if data.product_type_code and product and data.product_type_code != product.code:
             raise AppError(
                 422,
                 "PRODUCT_TYPE_MISMATCH",
                 "product_type_id and product_type_code identify different products.",
             )
+        pack = None
         if data.knowledge_pack_id:
             pack = self.repo.knowledge_pack_by_id(
                 actor.tenant_id, data.knowledge_pack_id
             )
             if (
-                pack.product_type_id != product.id
-                or pack.version != data.knowledge_pack_version
+                (product and pack.product_type_id not in (None, product.id))
+                or (data.knowledge_pack_version and pack.version != data.knowledge_pack_version)
             ):
                 raise AppError(
                     422,
                     "KNOWLEDGE_PACK_MISMATCH",
                     "The selected pack does not match the product type and version.",
                 )
-        else:
-            pack = self.repo.knowledge_pack(
-                actor.tenant_id, product.id, data.knowledge_pack_version
-            )
         project = self.repo.add(
             Project(
                 tenant_id=actor.tenant_id,
                 project_code=data.project_code,
                 name=data.name,
                 description=data.description,
-                product_type_id=product.id,
-                knowledge_pack_id=pack.id,
-                knowledge_pack_version=pack.version,
+                product_type_id=product.id if product else pack.product_type_id if pack else None,
+                knowledge_pack_id=pack.id if pack else None,
+                knowledge_pack_version=pack.version if pack else None,
                 product_variant=data.product_variant,
                 project_version=data.project_version,
                 status="ACTIVE",
@@ -309,6 +315,25 @@ class WorkflowService:
 
     def get_project(self, actor: Actor, project_id: str) -> ProjectRead:
         return self._project_read(actor, self.repo.require_project(actor, project_id))
+
+    def delete_project(self, actor: Actor, project_id: str) -> None:
+        self._require_role(actor, project_id, {"OWNER"})
+        project = self.repo.require_project(actor, project_id)
+        private_pack = None
+        if project.knowledge_pack_id:
+            pack = self.repo.knowledge_pack_by_id(
+                actor.tenant_id, project.knowledge_pack_id
+            )
+            if pack.status == "PROJECT_PRIVATE":
+                private_pack = pack
+                project.knowledge_pack_id = None
+                project.knowledge_pack_version = None
+                self.repo.flush()
+        self.repo.delete(project)
+        self.repo.flush()
+        if private_pack is not None:
+            self.repo.delete(private_pack)
+            self.repo.flush()
 
     def list_memberships(
         self, actor: Actor, project_id: str
@@ -353,10 +378,24 @@ class WorkflowService:
         self, actor: Actor, project_id: str
     ) -> KnowledgeContextRead:
         project = self.repo.require_project(actor, project_id)
+        context = self.repo.project_context(actor, project_id)
+        if not project.knowledge_pack_id:
+            return KnowledgeContextRead(
+                project_id=project.id,
+                knowledge_pack_id=None,
+                knowledge_pack_version=None,
+                knowledge_pack=None,
+                project_context=ProjectContextRead(
+                    items=context.constraints_json, revision=context.revision
+                ),
+                items=[],
+                item_counts={},
+                summary={},
+                counts={},
+            )
         pack = self.repo.knowledge_pack_by_id(
             actor.tenant_id, project.knowledge_pack_id
         )
-        context = self.repo.project_context(actor, project_id)
         items = self.repo.knowledge_items(actor.tenant_id, pack.id)
         counts: dict[str, int] = {}
         for item in items:
@@ -389,6 +428,132 @@ class WorkflowService:
             patterns=by_type("RISK_PATTERN"),
             failure_modes=by_type("FAILURE_MODE"),
         )
+
+    def add_project_knowledge(
+        self,
+        actor: Actor,
+        project_id: str,
+        additions: list[dict[str, Any]],
+        bump_version: bool,
+    ) -> KnowledgeContextRead:
+        return self._replace_project_knowledge(
+            actor, project_id, additions=additions, bump_version=bump_version
+        )
+
+    def update_project_knowledge(
+        self,
+        actor: Actor,
+        project_id: str,
+        code: str,
+        data: KnowledgeItemUpdate,
+        bump_version: bool,
+    ) -> KnowledgeContextRead:
+        return self._replace_project_knowledge(
+            actor,
+            project_id,
+            update_code=code,
+            update_data=data,
+            bump_version=bump_version,
+        )
+
+    def delete_project_knowledge(
+        self, actor: Actor, project_id: str, code: str, bump_version: bool
+    ) -> KnowledgeContextRead:
+        return self._replace_project_knowledge(
+            actor, project_id, delete_code=code, bump_version=bump_version
+        )
+
+    def _replace_project_knowledge(
+        self,
+        actor: Actor,
+        project_id: str,
+        *,
+        additions: list[dict[str, Any]] | None = None,
+        update_code: str | None = None,
+        update_data: KnowledgeItemUpdate | None = None,
+        delete_code: str | None = None,
+        bump_version: bool,
+    ) -> KnowledgeContextRead:
+        self._require_role(actor, project_id, {"OWNER", "EDITOR", "REVIEWER"})
+        project = self.repo.require_project(actor, project_id)
+        old_pack = (
+            self.repo.knowledge_pack_by_id(actor.tenant_id, project.knowledge_pack_id)
+            if project.knowledge_pack_id
+            else None
+        )
+        items = [
+            {
+                "item_type": item.item_type,
+                "code": item.code,
+                "title": item.title,
+                "content": item.content,
+                "parent_code": item.parent_code,
+                "metadata": item.metadata_json,
+            }
+            for item in (
+                self.repo.knowledge_items(actor.tenant_id, old_pack.id) if old_pack else []
+            )
+        ]
+        if update_code:
+            target = next((item for item in items if item["code"] == update_code), None)
+            if target is None:
+                from app.errors import not_found
+                raise not_found("KnowledgeItem", update_code)
+            assert update_data is not None
+            target.update(update_data.model_dump())
+        if delete_code:
+            remaining = [item for item in items if item["code"] != delete_code]
+            if len(remaining) == len(items):
+                from app.errors import not_found
+                raise not_found("KnowledgeItem", delete_code)
+            items = remaining
+        items.extend(additions or [])
+        if not items:
+            project.knowledge_pack_id = None
+            project.knowledge_pack_version = None
+            self.repo.flush()
+            return self.knowledge_context(actor, project_id)
+        version = self._next_pack_version(old_pack.version if old_pack else None) if bump_version else (old_pack.version if old_pack else "v1")
+        pack = self.repo.add(
+            KnowledgePack(
+                tenant_id=actor.tenant_id,
+                product_type_id=None,
+                name=old_pack.name if old_pack else f"{project.name} Knowledge Pack",
+                version=version,
+                status="PROJECT_PRIVATE",
+                content_hash=semantic_hash(items),
+            )
+        )
+        self.repo.flush()
+        self.repo.add_all([
+            KnowledgeItem(
+                tenant_id=actor.tenant_id,
+                knowledge_pack_id=pack.id,
+                item_type=str(item["item_type"]),
+                code=str(item["code"]),
+                title=str(item["title"]),
+                content=str(item["content"]),
+                parent_code=item.get("parent_code"),
+                metadata_json=item.get("metadata", {}),
+            )
+            for item in items
+        ])
+        project.knowledge_pack_id = pack.id
+        project.knowledge_pack_version = pack.version
+        self.repo.flush()
+        return self.knowledge_context(actor, project_id)
+
+    @staticmethod
+    def _next_pack_version(version: str | None) -> str:
+        if not version:
+            return "v1"
+        match = re.fullmatch(r"([vV]?)(\d+)", version.strip())
+        if match:
+            return f"{match.group(1) or 'v'}{int(match.group(2)) + 1}"
+        match = re.fullmatch(r"(\d+)\.0+", version.strip())
+        if match:
+            return f"{int(match.group(1)) + 1}.0"
+        return f"{version}.1"
 
     def update_context(
         self, actor: Actor, project_id: str, data: ProjectContextUpdate
@@ -840,8 +1005,66 @@ class WorkflowService:
             raise gate_blocked("A stale or superseded analysis cannot be reviewed.")
         was_approved = analysis.status == AssetStatus.APPROVED
         analysis.status = self._status_for_action(data.action)
+        analysis.rejection_reason = data.rejection_reason if data.action == ReviewAction.REJECT else None
+        analysis.rejection_note = data.rejection_note if data.action == ReviewAction.REJECT else None
         analysis.asset_revision += 1
         if was_approved and data.action == ReviewAction.REJECT:
+            self._stale_analysis_downstream(actor.tenant_id, analysis.id)
+        self.repo.flush()
+        return self.get_analysis(actor, analysis.id)
+
+    def update_analysis(self, actor: Actor, analysis_id: str, data: AnalysisUpdate) -> AnalysisRead:
+        analysis = self.repo.analysis(actor, analysis_id)
+        self._require_role(actor, analysis.project_id, {"OWNER", "EDITOR", "REVIEWER"})
+        self._check_revision("Analysis", data.expected_revision, analysis.asset_revision)
+        if analysis.status in {AssetStatus.STALE, AssetStatus.SUPERSEDED}:
+            raise gate_blocked("A stale or superseded analysis cannot be edited.")
+        before = analysis.semantic_hash
+        if data.summary is not None:
+            analysis.summary = data.summary
+        if data.ambiguities is not None:
+            analysis.ambiguities_json = data.ambiguities
+        if data.why_generated is not None:
+            analysis.why_generated = data.why_generated
+        if data.assertions is not None:
+            requirement = self.repo.requirement(actor, analysis.requirement_id)
+            codes = [item.code for item in data.assertions]
+            if len(codes) != len(set(codes)):
+                raise AppError(422, "DUPLICATE_ASSERTION_CODE", "Assertion codes must be unique.")
+            for item in data.assertions:
+                if item.source_span not in requirement.original_text:
+                    raise AppError(422, "INVALID_SOURCE_SPAN", "Assertion source_span must occur in the requirement text.")
+            existing = {item.code: item for item in self.repo.assertions(actor.tenant_id, analysis.id)}
+            incoming = {item.code: item for item in data.assertions}
+            if self.repo.risk_batches(actor.tenant_id, analysis.requirement_id) and set(existing) - set(incoming):
+                raise AppError(409, "ASSERTION_IN_USE", "Assertions already used by downstream risks cannot be removed; edit them or regenerate the analysis.")
+            for code, current in existing.items():
+                if code not in incoming:
+                    self.repo.session.delete(current)
+                    continue
+                item = incoming[code]
+                current.text = item.text
+                current.constraint_json = item.constraint_json
+                current.source_span = item.source_span
+            for code, item in incoming.items():
+                if code not in existing:
+                    self.repo.add(RequirementAssertion(
+                        tenant_id=actor.tenant_id, project_id=analysis.project_id,
+                        requirement_id=analysis.requirement_id, analysis_id=analysis.id,
+                        code=item.code, text=item.text, constraint_json=item.constraint_json,
+                        source_span=item.source_span,
+                    ))
+            self.repo.flush()
+        assertions = self.repo.assertions(actor.tenant_id, analysis.id)
+        analysis.semantic_hash = semantic_hash(
+            analysis.summary, analysis.ambiguities_json, analysis.why_generated,
+            [{"code": item.code, "text": item.text, "constraint": item.constraint_json, "source_span": item.source_span} for item in assertions],
+        )
+        analysis.asset_revision += 1
+        analysis.status = AssetStatus.HUMAN_EDITED
+        analysis.rejection_reason = None
+        analysis.rejection_note = None
+        if analysis.semantic_hash != before:
             self._stale_analysis_downstream(actor.tenant_id, analysis.id)
         self.repo.flush()
         return self.get_analysis(actor, analysis.id)
@@ -879,6 +1102,8 @@ class WorkflowService:
         risk.semantic_hash = risk_semantic_hash(risk)
         risk.asset_revision += 1
         risk.status = AssetStatus.HUMAN_EDITED
+        risk.rejection_reason = None
+        risk.rejection_note = None
         if risk.semantic_hash != before:
             self._stale_risk_downstream(actor.tenant_id, risk.id)
         batch = self.repo.risk_batch_internal(actor.tenant_id, risk.batch_id)
@@ -928,6 +1153,8 @@ class WorkflowService:
         scenario.semantic_hash = scenario_semantic_hash(scenario)
         scenario.asset_revision += 1
         scenario.status = AssetStatus.HUMAN_EDITED
+        scenario.rejection_reason = None
+        scenario.rejection_note = None
         if scenario.semantic_hash != before:
             self._stale_scenario_downstream(actor.tenant_id, scenario.id)
         batch = self.repo.scenario_batch_internal(actor.tenant_id, scenario.batch_id)
@@ -968,6 +1195,16 @@ class WorkflowService:
             case.expected_result_status = data.expected_result_status
         if data.blocking_questions is not None:
             case.blocking_questions_json = data.blocking_questions
+        if data.steps is not None:
+            for step in self.repo.steps(actor.tenant_id, case.id):
+                self.repo.session.delete(step)
+            self.repo.flush()
+            for sequence, step in enumerate(data.steps, start=1):
+                self.repo.add(TestStep(
+                    tenant_id=actor.tenant_id, project_id=case.project_id,
+                    test_case_id=case.id, sequence=sequence, action=step.action,
+                    expected_result=step.expected_result, test_data=step.test_data,
+                ))
         self._validate_expected(
             case.expected_result,
             case.expected_result_status,
@@ -976,12 +1213,51 @@ class WorkflowService:
         case.semantic_hash = test_case_semantic_hash(case)
         case.asset_revision += 1
         case.status = AssetStatus.HUMAN_EDITED
+        case.rejection_reason = None
+        case.rejection_note = None
         batch = self.repo.test_case_batch_internal(actor.tenant_id, case.batch_id)
         self._update_batch_status(
             batch, self.repo.test_cases(actor.tenant_id, case.batch_id)
         )
         self.repo.flush()
         return self._test_case_read(actor.tenant_id, case)
+
+    def delete_analysis(self, actor: Actor, analysis_id: str, data: AssetDelete) -> None:
+        analysis = self.repo.analysis(actor, analysis_id)
+        self._delete_asset(actor, analysis, data)
+        self._stale_analysis_downstream(actor.tenant_id, analysis.id)
+        self.repo.flush()
+
+    def delete_risk(self, actor: Actor, risk_id: str, data: AssetDelete) -> None:
+        risk = self.repo.risk(actor, risk_id)
+        self._delete_asset(actor, risk, data)
+        self._stale_risk_downstream(actor.tenant_id, risk.id)
+        batch = self.repo.risk_batch_internal(actor.tenant_id, risk.batch_id)
+        self._update_batch_status(batch, self.repo.risks(actor.tenant_id, risk.batch_id))
+        self.repo.flush()
+
+    def delete_scenario(self, actor: Actor, scenario_id: str, data: AssetDelete) -> None:
+        scenario = self.repo.scenario(actor, scenario_id)
+        self._delete_asset(actor, scenario, data)
+        self._stale_scenario_downstream(actor.tenant_id, scenario.id)
+        batch = self.repo.scenario_batch_internal(actor.tenant_id, scenario.batch_id)
+        self._update_batch_status(batch, self.repo.scenarios(actor.tenant_id, scenario.batch_id))
+        self.repo.flush()
+
+    def delete_test_case(self, actor: Actor, test_case_id: str, data: AssetDelete) -> None:
+        case = self.repo.test_case(actor, test_case_id)
+        self._delete_asset(actor, case, data)
+        batch = self.repo.test_case_batch_internal(actor.tenant_id, case.batch_id)
+        self._update_batch_status(batch, self.repo.test_cases(actor.tenant_id, case.batch_id))
+        self.repo.flush()
+
+    def _delete_asset(self, actor: Actor, item: Any, data: AssetDelete) -> None:
+        self._require_role(actor, item.project_id, {"OWNER", "EDITOR"})
+        self._check_revision(item.__class__.__name__, data.expected_revision, item.asset_revision)
+        item.deleted_at = utcnow()
+        item.deleted_by = actor.user_id
+        item.deletion_reason = data.reason
+        item.asset_revision += 1
 
     def update_test_case_in_batch(
         self, actor: Actor, batch_id: str, case_id: str, data: TestCaseUpdate
@@ -1859,8 +2135,10 @@ class WorkflowService:
                 "parent_code": item.parent_code,
                 "metadata": item.metadata_json,
             }
-            for item in self.repo.knowledge_items(
-                actor.tenant_id, project.knowledge_pack_id
+            for item in (
+                self.repo.knowledge_items(actor.tenant_id, project.knowledge_pack_id)
+                if project.knowledge_pack_id
+                else []
             )
         ]
         snapshot: dict[str, Any] = {
@@ -2113,10 +2391,15 @@ class WorkflowService:
         status = self._status_for_action(data.action)
         for item in chosen:
             item.status = status
+            item.rejection_reason = data.rejection_reason if data.action == ReviewAction.REJECT else None
+            item.rejection_note = data.rejection_note if data.action == ReviewAction.REJECT else None
             item.asset_revision += 1
 
     @staticmethod
     def _update_batch_status(batch: Any, items: list[Any]) -> None:
+        if not items:
+            batch.status = AssetStatus.HUMAN_EDITED
+            return
         statuses = {item.status for item in items}
         if statuses == {AssetStatus.APPROVED}:
             batch.status = AssetStatus.APPROVED
@@ -2321,8 +2604,10 @@ class WorkflowService:
                 "parent_code": item.parent_code,
                 "metadata": item.metadata_json,
             }
-            for item in self.repo.knowledge_items(
-                run.tenant_id, snapshot["knowledge_pack_id"]
+            for item in (
+                self.repo.knowledge_items(run.tenant_id, snapshot["knowledge_pack_id"])
+                if snapshot["knowledge_pack_id"]
+                else []
             )
         ]
         if semantic_hash(current_knowledge) != snapshot["knowledge_content_hash"]:
@@ -2470,11 +2755,15 @@ class WorkflowService:
         )
 
     def _project_read(self, actor: Actor, project: Project) -> ProjectRead:
-        product = self.repo.product_type_by_id(actor.tenant_id, project.product_type_id)
+        product = (
+            self.repo.product_type_by_id(actor.tenant_id, project.product_type_id)
+            if project.product_type_id
+            else None
+        )
         context = self.repo.project_context(actor, project.id)
         return ProjectRead.model_validate(project).model_copy(
             update={
-                "product_type": ProductTypeRead.model_validate(product),
+                "product_type": ProductTypeRead.model_validate(product) if product else None,
                 "context_revision": context.revision,
             }
         )

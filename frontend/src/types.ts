@@ -46,7 +46,7 @@ export interface ProductType {
 
 export interface KnowledgePack {
   id: string
-  product_type_id: string
+  product_type_id?: string | null
   name: string
   version: string
   description?: string | null
@@ -59,10 +59,10 @@ export interface Project {
   project_code: string
   name: string
   description?: string | null
-  product_type_id: string
+  product_type_id?: string | null
   product_type?: ProductType
-  knowledge_pack_id: string
-  knowledge_pack_version: string
+  knowledge_pack_id?: string | null
+  knowledge_pack_version?: string | null
   product_variant?: string | null
   project_version?: string | null
   status: string
@@ -98,6 +98,14 @@ export interface KnowledgeContextSummary {
   rules?: Array<Record<string, unknown>>
   patterns?: Array<Record<string, unknown>>
   failure_modes?: Array<Record<string, unknown>>
+  items?: Array<{
+    id: string
+    item_type: string
+    code: string
+    title: string
+    content: string
+    parent_code?: string | null
+  }>
 }
 
 export interface Requirement {
@@ -172,6 +180,8 @@ export interface RequirementAnalysis {
   dependencies?: Array<Record<string, unknown>>
   knowledge_references?: KnowledgeReference[]
   review_status: ReviewStatus
+  rejection_reason?: string | null
+  rejection_note?: string | null
 }
 
 export interface RequirementRisk {
@@ -187,6 +197,8 @@ export interface RequirementRisk {
   review_status: ReviewStatus
   revision: number
   knowledge_references?: KnowledgeReference[]
+  rejection_reason?: string | null
+  rejection_note?: string | null
 }
 
 export interface TestScenario {
@@ -204,6 +216,9 @@ export interface TestScenario {
   revision: number
   knowledge_references?: KnowledgeReference[]
   blocking_questions?: string[]
+  preconditions?: string[]
+  rejection_reason?: string | null
+  rejection_note?: string | null
 }
 
 export interface TestCaseStep {
@@ -224,6 +239,7 @@ export interface TestCase {
   priority: string
   scenario_id: string
   expected_result_status?: ExpectedBehaviorStatus
+  expected_result?: string | null
   generation_reason?: string
   objective?: string | null
   preconditions?: string[]
@@ -234,6 +250,13 @@ export interface TestCase {
   steps: TestCaseStep[]
   knowledge_references?: KnowledgeReference[]
   blocking_questions?: string[]
+  rejection_reason?: string | null
+  rejection_note?: string | null
+}
+
+export interface RejectionFeedback {
+  reason: 'INCORRECT' | 'IRRELEVANT' | 'DUPLICATE' | 'INSUFFICIENT_EVIDENCE' | 'CONFLICTS_WITH_KNOWLEDGE' | 'WRONG_GRANULARITY' | 'OTHER'
+  note?: string
 }
 
 export interface RiskBatch {

@@ -87,7 +87,7 @@ export function normalizeKnowledgePack(value: unknown): KnowledgePack {
   const summary = asRecord(raw.summary)
   return {
     id: asString(raw.id),
-    product_type_id: asString(raw.product_type_id),
+    product_type_id: asOptionalString(raw.product_type_id),
     name: asString(raw.name, 'Knowledge Pack'),
     version: asString(raw.version, '1.0'),
     description: asOptionalString(raw.description),
@@ -108,10 +108,10 @@ export function normalizeProject(value: unknown): Project {
     project_code: asString(raw.project_code),
     name: asString(raw.name, 'Unnamed Project'),
     description: asOptionalString(raw.description),
-    product_type_id: asString(raw.product_type_id),
+    product_type_id: asOptionalString(raw.product_type_id),
     product_type: productType,
-    knowledge_pack_id: asString(raw.knowledge_pack_id),
-    knowledge_pack_version: asString(raw.knowledge_pack_version),
+    knowledge_pack_id: asOptionalString(raw.knowledge_pack_id),
+    knowledge_pack_version: asOptionalString(raw.knowledge_pack_version),
     product_variant: asOptionalString(raw.product_variant),
     project_version: asOptionalString(raw.project_version),
     status: asString(raw.status, 'Active'),
@@ -234,6 +234,17 @@ export function normalizeKnowledgeContext(value: unknown): KnowledgeContextSumma
     rules: asArray(raw.rules).map(asRecord),
     patterns: asArray(raw.patterns).map(asRecord),
     failure_modes: asArray(raw.failure_modes).map(asRecord),
+    items: asArray(raw.items).map((value) => {
+      const item = asRecord(value)
+      return {
+        id: asString(item.id),
+        item_type: asString(item.item_type),
+        code: asString(item.code),
+        title: asString(item.title),
+        content: asString(item.content),
+        parent_code: asOptionalString(item.parent_code),
+      }
+    }),
   }
 }
 
@@ -276,6 +287,8 @@ export function normalizeAnalysis(value: unknown): RequirementAnalysis {
     dependencies: asArray(raw.dependencies).map(asRecord),
     knowledge_references: normalizeKnowledgeReferences(raw.knowledge_references),
     review_status: normalizeReviewStatus(raw.review_status ?? raw.status),
+    rejection_reason: asOptionalString(raw.rejection_reason),
+    rejection_note: asOptionalString(raw.rejection_note),
   }
 }
 
@@ -294,6 +307,8 @@ function normalizeRisk(value: unknown): RequirementRisk {
     review_status: normalizeReviewStatus(raw.review_status ?? raw.status),
     revision: asNumber(raw.revision, asNumber(raw.asset_revision, 1)),
     knowledge_references: normalizeKnowledgeReferences(raw.knowledge_references),
+    rejection_reason: asOptionalString(raw.rejection_reason),
+    rejection_note: asOptionalString(raw.rejection_note),
   }
 }
 
@@ -330,6 +345,9 @@ function normalizeScenario(value: unknown): TestScenario {
     blocking_questions: asArray(raw.blocking_questions ?? raw.blocking_questions_json)
       .map((item) => asString(item))
       .filter(Boolean),
+    preconditions: asArray(raw.preconditions ?? raw.preconditions_json).map((item) => asString(item)).filter(Boolean),
+    rejection_reason: asOptionalString(raw.rejection_reason),
+    rejection_note: asOptionalString(raw.rejection_note),
   }
 }
 
@@ -370,6 +388,7 @@ function normalizeTestCase(value: unknown): TestCase {
     priority: asString(raw.priority, 'MEDIUM'),
     scenario_id: asString(raw.scenario_id),
     expected_result_status: normalizeExpectedStatus(raw.expected_result_status, expectedResult),
+    expected_result: asOptionalString(expectedResult),
     generation_reason: asString(raw.generation_reason, asString(raw.why_generated)),
     preconditions: asArray(raw.preconditions ?? raw.preconditions_json)
       .map((item) => asString(item))
@@ -383,6 +402,8 @@ function normalizeTestCase(value: unknown): TestCase {
     blocking_questions: asArray(raw.blocking_questions ?? raw.blocking_questions_json)
       .map((item) => asString(item))
       .filter(Boolean),
+    rejection_reason: asOptionalString(raw.rejection_reason),
+    rejection_note: asOptionalString(raw.rejection_note),
   }
 }
 

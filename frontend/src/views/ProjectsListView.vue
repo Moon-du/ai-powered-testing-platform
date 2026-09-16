@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { useQuery } from '@tanstack/vue-query'
-import { PlusOutlined, SearchOutlined } from '@ant-design/icons-vue'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
+import { DeleteOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons-vue'
+import { message, Modal } from 'ant-design-vue'
 
 import { platformApi, readableApiError } from '@/api/client'
 import ErrorState from '@/components/common/ErrorState.vue'
@@ -12,6 +13,7 @@ import type { Project } from '@/types'
 import { formatDateTime } from '@/utils/presentation'
 
 const router = useRouter()
+const queryClient = useQueryClient()
 const search = ref('')
 
 const {
@@ -42,11 +44,31 @@ const columns = [
   { title: 'Variant', dataIndex: 'product_variant', key: 'variant', width: 150 },
   { title: '状态', key: 'status', width: 110 },
   { title: '最近更新', key: 'updatedAt', width: 180 },
-  { title: '', key: 'action', width: 92, fixed: 'right' as const },
+  { title: '操作', key: 'action', width: 150, fixed: 'right' as const },
 ]
 
 function openProject(project: Project): void {
   void router.push({ name: 'project-overview', params: { projectId: project.id } })
+}
+
+const deleteMutation = useMutation({
+  mutationFn: (projectId: string) => platformApi.deleteProject(projectId),
+  onSuccess: async () => {
+    await queryClient.invalidateQueries({ queryKey: ['projects'] })
+    void message.success('项目及其全部内容已删除')
+  },
+  onError: (error) => void message.error(readableApiError(error)),
+})
+
+function confirmDelete(project: Project): void {
+  Modal.confirm({
+    title: `删除项目“${project.name}”？`,
+    content: '该项目下的需求、AI 分析、风险、场景、测试用例、运行记录、项目上下文及项目私有 Product Knowledge 都会永久删除，此操作无法撤销。',
+    okText: '确认删除',
+    okType: 'danger',
+    cancelText: '取消',
+    onOk: () => deleteMutation.mutateAsync(project.id),
+  })
 }
 </script>
 
@@ -92,11 +114,14 @@ function openProject(project: Project): void {
           <div class="muted mono">{{ record.project_code }}</div>
         </template>
         <template v-else-if="column.key === 'productType'">
-          {{ record.product_type?.display_name ?? record.product_type?.name ?? record.product_type_id }}
+          {{ record.product_type?.display_name ?? record.product_type?.name ?? 'custom' }}
         </template>
         <template v-else-if="column.key === 'pack'">
-          <strong>v{{ record.knowledge_pack_version }}</strong>
-          <div class="muted mono">{{ record.knowledge_pack_id }}</div>
+          <template v-if="record.knowledge_pack_version">
+            <strong>{{ record.knowledge_pack_version }}</strong>
+            <div class="muted mono">{{ record.knowledge_pack_id }}</div>
+          </template>
+          <span v-else>None</span>
         </template>
         <template v-else-if="column.key === 'status'">
           <StatusTag :status="record.status" kind="workflow" />
@@ -105,7 +130,12 @@ function openProject(project: Project): void {
           {{ formatDateTime(record.updated_at ?? record.created_at) }}
         </template>
         <template v-else-if="column.key === 'action'">
-          <a-button @click="openProject(record)">打开</a-button>
+          <a-space>
+            <a-button @click="openProject(record)">打开</a-button>
+            <a-button danger :loading="deleteMutation.isPending.value" @click="confirmDelete(record)">
+              <template #icon><DeleteOutlined /></template>
+            </a-button>
+          </a-space>
         </template>
       </template>
     </a-table>
