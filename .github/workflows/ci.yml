@@ -24,7 +24,7 @@ jobs:
       LLM_PROVIDER: fake
       DEV_AUTH_ENABLED: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -40,7 +40,7 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
         with:
           version: 11.19.0
@@ -62,7 +62,7 @@ jobs:
       OBJECT_STORAGE_ACCESS_KEY: ci-minio-access
       OBJECT_STORAGE_SECRET_KEY: ci-minio-secret-2026
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cp .env.example .env
       - run: docker compose config --quiet
       - run: docker compose build backend frontend
