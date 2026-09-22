@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@ant-design/icons-vue": "^7.0.1",
-    "@tanstack/vue-query": "^5.87.1",
+    "@tanstack/vue-query": "^5.103.1",
     "ant-design-vue": "^4.2.6",
     "axios": "^1.11.0",
     "pinia": "^3.0.3",
